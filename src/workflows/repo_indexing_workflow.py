@@ -8,6 +8,7 @@ from src.activities.indexing_activities import (
     persist_kg_activity,
     cleanup_repo_activity,
     cleanup_stale_kg_nodes_activity,
+    emit_workflow_event_activity,
 )
 from temporalio import workflow
 from src.utils.logging import get_logger
@@ -59,6 +60,19 @@ class RepoIndexingWorkflow:
         }
 
         # Add event context to repo_request for all activities
+        # Step 0: Emit workflow started event
+        await workflow.execute_activity(
+            emit_workflow_event_activity,
+            {
+                "event_type": "workflow_started",
+                "message": f"Initiating indexing for {repo_request['repository']['github_repo_name']}...",
+                "metadata": {"progress": 0},
+                "event_context": event_context
+            },
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=2)
+        )
+
         repo_request_with_context = {
             **repo_request,
             "event_context": event_context,
@@ -87,6 +101,18 @@ class RepoIndexingWorkflow:
             logger.info(
                 f"Skipping indexing for {repo_request['repository']['github_repo_name']}: "
                 f"{precheck_result['reason']} (SHA: {precheck_result['current_sha'][:8] if precheck_result['current_sha'] else 'None'})"
+            )
+            # Emit completed event for skipped status
+            await workflow.execute_activity(
+                emit_workflow_event_activity,
+                {
+                    "event_type": "workflow_completed",
+                    "message": f"Skipped: {precheck_result['reason']}",
+                    "metadata": {"status": "skipped", "progress": 100},
+                    "event_context": event_context
+                },
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2)
             )
             return {
                 "status": "skipped",
@@ -188,7 +214,7 @@ class RepoIndexingWorkflow:
                 f"Cleaned up {cleanup_result['nodes_deleted']} stale KG nodes"
             )
             
-            return {
+            result = {
                 "status": "success",
                 "repo": repo_request["repository"]["github_repo_name"],
                 "commit_sha": clone_result["commit_sha"],
@@ -196,8 +222,37 @@ class RepoIndexingWorkflow:
                 "nodes_deleted_before_write": persist_kg_result.get("nodes_deleted", 0),
                 "stale_nodes_deleted": cleanup_result["nodes_deleted"],
             }
+
+            # Emit final completed event
+            await workflow.execute_activity(
+                emit_workflow_event_activity,
+                {
+                    "event_type": "workflow_completed",
+                    "message": f"Successfully indexed {repo_request['repository']['github_repo_name']}",
+                    "metadata": {"progress": 100},
+                    "event_context": event_context
+                },
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+            return result
         except Exception as e:
-            logger.error(f"Failed to clone repository: {str(e)}")
+            logger.error(f"Workflow failed: {str(e)}")
+            # Emit failed event
+            try:
+                await workflow.execute_activity(
+                    emit_workflow_event_activity,
+                    {
+                        "event_type": "workflow_failed",
+                        "message": f"Workflow failed: {str(e)}",
+                        "metadata": {"error": str(e)},
+                        "event_context": event_context
+                    },
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2)
+                )
+            except Exception as emit_err:
+                logger.warning(f"Failed to emit workflow failed event: {emit_err}")
             raise
         finally:
             # Step 5: Always cleanup (even on failure)

@@ -44,20 +44,20 @@ async def github_setup(
     Handle GitHub App installation setup callback
     
     This endpoint is called by GitHub after a user completes the installation.
-    GitHub will redirect here if you set this URL as the "Setup URL" in your GitHub App settings.
+    Redirects to the frontend's settings page with the installation_id.
     """
+    from fastapi.responses import RedirectResponse
+    from src.core.config import settings
+    
     if not installation_id:
         logger.warning("No installation_id provided in setup callback")
-        return {
-            "status": "error",
-            "message": "Installation ID not provided"
-        }
+        # Redirect to settings with error
+        frontend_url = settings.FRONTEND_URL or "http://localhost:3000"
+        return RedirectResponse(url=f"{frontend_url}/settings?error=no_installation_id")
         
-    return {
-        "status": "success",
-        "message": "GitHub installation complete! You can now close this window and return to the application.",
-        "installation_id": installation_id
-    }
+    # Redirect to frontend settings page with installation_id
+    frontend_url = settings.FRONTEND_URL or "http://localhost:3000"
+    return RedirectResponse(url=f"{frontend_url}/settings?connected=true&installation_id={installation_id}")
 
 @router.post("/events")
 async def github_webhook(

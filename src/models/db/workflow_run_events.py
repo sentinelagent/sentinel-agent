@@ -14,7 +14,7 @@ class WorkflowRunEvent(Base):
 
     Key design decisions:
     - sequence_number provides ordering and reconnection support
-    - metadata JSONB allows activity-specific data (file counts, SHAs, etc.)
+    - event_metadata JSONB allows activity-specific data (file counts, SHAs, etc.)
     - user_id enables authorization checks in SSE endpoint
     - workflow_type supports future expansion (pr_review, etc.)
     """
@@ -39,7 +39,7 @@ class WorkflowRunEvent(Base):
     activity_name = Column(String(100), nullable=True)
     event_type = Column(String(50), nullable=False)
     message = Column(String, nullable=False)
-    metadata = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    event_metadata = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
 
     # Timestamp
     created_at = Column(TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP"))

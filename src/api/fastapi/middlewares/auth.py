@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status, Request, Cookie
+from fastapi import Depends, HTTPException, status, Request, Cookie, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
 from supabase import Client
@@ -15,6 +15,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 def get_current_user(
     request: Request,
     access_token: Optional[str] = Cookie(None),
+    token_query: Optional[str] = Query(None, alias="token"),
     authorization: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: Session = Depends(get_db),
     supabase: Client = Depends(get_supabase_client)
@@ -34,24 +35,27 @@ def get_current_user(
     Returns:
         User: The authenticated user object from the database.
     """
-    token = None
+    token_val = None
     
     if authorization:
-        token = authorization.credentials
+        token_val = authorization.credentials
         logger.info(f"Using token from Authorization header")
     elif access_token:
-        token = access_token
+        token_val = access_token
         logger.info(f"Using token from cookie")
+    elif token_query:
+        token_val = token_query
+        logger.info(f"Using token from query parameter")
     
-    if not token:
-        logger.error("No token found in either Authorization header or cookies")
+    if not token_val:
+        logger.error("No token found in Authorization header, cookies or query parameters")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication token is missing from both Authorization header and cookies"
+            detail="Authentication token is missing from Authorization header, cookies and query parameters"
         )
 
     try:
-        auth_response = supabase.auth.get_user(token)
+        auth_response = supabase.auth.get_user(token_val)
         
         supabase_user = auth_response.user
         if not supabase_user:

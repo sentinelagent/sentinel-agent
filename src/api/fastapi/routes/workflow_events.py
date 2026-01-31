@@ -18,115 +18,29 @@ import json
 from typing import Optional, AsyncGenerator
 from fastapi import APIRouter, Query, HTTPException, Depends
 from fastapi.responses import StreamingResponse
-from supabase import Client
-
-from src.core.supabase_client import get_supabase_client
+from src.api.fastapi.middlewares.auth import get_current_user
+from src.models.db.users import User
 from src.services.workflow_events import WorkflowEventService, WorkflowEventType
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/workflows", tags=["workflow_events"])
+router = APIRouter(prefix="/workflows", tags=["workflow_events"])
 
 
 @router.get("/{workflow_id}/events")
 async def stream_workflow_events(
     workflow_id: str,
-    token: str = Query(..., description="JWT authentication token"),
+    run_id: Optional[str] = Query(None, description="Workflow run ID to filter events for current execution"),
     last_event_id: Optional[int] = Query(None, description="Last received sequence number for reconnection"),
-    supabase: Client = Depends(get_supabase_client),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Stream workflow progress events via Server-Sent Events (SSE).
-
-    This endpoint provides real-time progress updates for a workflow execution.
-    The frontend connects using EventSource, which automatically handles
-    reconnection and provides the last_event_id for resuming streams.
-
-    Authentication:
-    - JWT token passed as query parameter (EventSource doesn't support headers)
-    - Token is validated via Supabase auth
-
-    Event Format:
-    ```
-    event: activity
-    id: 5
-    data: {"sequence_number": 5, "activity_name": "clone_repo_activity", ...}
-
-    ```
-
-    Reconnection:
-    - Client passes last_event_id query parameter
-    - Server resumes from that sequence number
-    - Handles network interruptions gracefully
-
-    Terminal Events:
-    - workflow_completed: Closes stream after successful workflow
-    - workflow_failed: Closes stream after workflow error
-
-    Args:
-        workflow_id: Temporal workflow ID
-        token: JWT token for authentication
-        last_event_id: Optional sequence number for reconnection
-        supabase: Supabase client for auth validation
-
-    Returns:
-        StreamingResponse with text/event-stream content type
-
-    Raises:
-        HTTPException 401: Invalid or expired token
-        HTTPException 403: User doesn't own this workflow
     """
-    # Step 1: Validate JWT token
-    try:
-        auth_response = supabase.auth.get_user(token)
-        supabase_user = auth_response.user
-
-        if not supabase_user:
-            logger.warning(f"Invalid token provided for workflow_id={workflow_id}")
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid or expired authentication token"
-            )
-
-        user_email = supabase_user.email
-        logger.info(f"SSE connection initiated by {user_email} for workflow_id={workflow_id}")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Authentication error for workflow SSE: {e}")
-        raise HTTPException(
-            status_code=401,
-            detail=f"Authentication failed: {str(e)}"
-        )
-
-    # Step 2: Get user_id from email
-    # We need to query local DB for user_id, but for SSE we'll use a simplified approach
-    # The WorkflowEventService will check authorization internally
-    # For now, we'll trust the token and let the service handle auth
-    # In production, you'd want to fetch user_id from local DB here
-
-    # For this implementation, we'll pass user_email as user_id
-    # This requires that event_context stores email instead of UUID
-    # Or we need to query the User table here
-    # Let's query the User table to get the proper user_id
-
-    from src.core.database import SessionLocal
-    from src.models.db.users import User
-
-    db = SessionLocal()
-    try:
-        local_user = db.query(User).filter(User.email == user_email).first()
-        if not local_user:
-            logger.error(f"User {user_email} not found in local database")
-            raise HTTPException(
-                status_code=404,
-                detail="User not found in database"
-            )
-        user_id = str(local_user.user_id)
-    finally:
-        db.close()
+    user_id = str(current_user.user_id)
+    user_email = current_user.email
+    logger.info(f"SSE connection initiated by {user_email} for workflow_id={workflow_id}, run_id={run_id}")
 
     # Step 3: Create event generator
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -152,6 +66,7 @@ async def stream_workflow_events(
                 events = await service.get_events_since(
                     workflow_id=workflow_id,
                     user_id=user_id,
+                    workflow_run_id=run_id,
                     since_sequence=last_seq,
                     limit=50,  # Fetch up to 50 events per poll
                 )

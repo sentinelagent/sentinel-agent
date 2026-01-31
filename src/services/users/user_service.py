@@ -95,11 +95,22 @@ class UserService:
         """
         if not current_user:
             raise UserNotFoundError("User not found.")
+        
+        installations = []
+        for inst in current_user.github_installations:
+            installations.append({
+                "id": str(inst.id),
+                "installation_id": inst.installation_id,
+                "github_account_username": inst.github_account_username,
+                "github_account_type": inst.github_account_type
+            })
+
         return {
             "user_id": str(current_user.user_id),
             "email": current_user.email,
             "created_at": current_user.created_at,
-            "updated_at": current_user.updated_at
+            "updated_at": current_user.updated_at,
+            "github_installations": installations
         }
 
     def set_user_id_for_installation(self, current_user: User, installation_id: int) -> dict:

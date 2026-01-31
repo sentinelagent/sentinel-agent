@@ -39,8 +39,6 @@ class UserHelpers:
         except Exception as e:
             logger.error(f"Error checking if user exists: {e}")
             raise AppException(status_code=500, message="An unexpected error occurred.")
-        finally:
-            self.db.close()
 
     def _create_supabase_user(self, email: str, password: str) -> dict:
         """Create user in Supabase Auth"""
@@ -101,8 +99,6 @@ class UserHelpers:
             self.db.rollback()
             logger.error(f"Database error while creating local user: {e}")
             raise AppException(status_code=500, message="Database error occurred while creating user.")
-        finally:
-            self.db.close()
             
     def _authenticate_with_supabase(self, email: str, password: str) -> dict:
         """Authenticate user with Supabase"""
@@ -141,8 +137,6 @@ class UserHelpers:
         except Exception as e:
             logger.error(f"Error updating last login: {e}")
             raise AppException(status_code=500, message="An unexpected error occurred.")
-        finally:
-            self.db.close()
     
     def _set_user_id_for_installation(self, current_user: User, installation_id: int) -> dict:
         """Set the user ID for the installation"""
@@ -166,8 +160,6 @@ class UserHelpers:
         except Exception as e:
             logger.error(f"Error setting user ID for installation: {e}")
             raise AppException(status_code=500, message="An unexpected error occurred.")
-        finally:
-            self.db.close()
         
     def _logout(self, current_user: User) -> None:
         """Logout the currently authenticated user"""

@@ -94,6 +94,12 @@ class MetadataService:
         db: Session = SessionLocal()
         
         try:
+            # Validate repo_id is a valid UUID
+            try:
+                uuid.UUID(repo_id) if isinstance(repo_id, str) else repo_id
+            except ValueError:
+                raise Exception(f"Invalid repository ID format (expected UUID): {repo_id}")
+
             # Create snapshot record (commit_sha can be None for branch-based indexing)
             snapshot_id = str(uuid.uuid4())
             snapshot = RepoSnapshot(
@@ -135,6 +141,13 @@ class MetadataService:
         db: Session = SessionLocal()
         
         try:
+            # Validate repo_id is a valid UUID
+            try:
+                uuid.UUID(repo_id) if isinstance(repo_id, str) else repo_id
+            except ValueError:
+                logger.warning(f"Invalid repository ID format for snapshot query: {repo_id}")
+                return None
+
             # Query latest snapshot by created_at descending
             latest_snapshot = db.query(RepoSnapshot).filter(
                 RepoSnapshot.repository_id == repo_id

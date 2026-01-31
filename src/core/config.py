@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     GITHUB_APP_NAME: str = os.getenv("GITHUB_APP_NAME", "demo-sen-1")
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "https://<project_name>.supabase.co")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "api_key")
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
     NGROK_AUTHTOKEN: str = os.getenv("NGROK_AUTHTOKEN", "1234567890")
     TEMPORAL_SERVER_URL: str = os.getenv("TEMPORAL_SERVER_URL", "host.docker.internal:7233")

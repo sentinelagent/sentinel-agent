@@ -7,14 +7,16 @@ from src.models.db.users import User
 from src.utils.response import IndexRepoResponse, IndexRepoResponseItem
 from src.utils.requests import IndexRepoRequest
 from src.workflows.repo_indexing_workflow import RepoIndexingWorkflow
+from src.services.repository.repository_service import RepositoryService
 
-router = APIRouter()
+router = APIRouter(prefix="/indexing", tags=["Indexing"])
 
 @router.post("/index", response_model = IndexRepoResponse)
 async def index_repo(
     repo_request: IndexRepoRequest,
     temporal_client: Client = Depends(temporal_client.get_client),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    repo_service: RepositoryService = Depends(RepositoryService)
 ):
     """
     Trigger repository indexing workflows for multiple repositories.
@@ -30,15 +32,25 @@ async def index_repo(
         responses = []
 
         for repo in repo_list:
+            # Step 1: Ensure repository exists in our local DB and get its UUID
+            db_repo = repo_service.upsert_repository(
+                installation_id=repo_request.installation_id,
+                repo_data=repo.model_dump()
+            )
+            
+            # Step 2: Use the local DB UUID for repo_id in the workflow
+            workflow_repo_data = repo.model_dump(mode="json")
+            workflow_repo_data["repo_id"] = str(db_repo.id)
+            
             workflow_id = f"repo-index-{repo.github_repo_id}-{repo.default_branch}"
-            input = {
+            input_data = {
                 "installation_id": repo_request.installation_id,
                 "user_id": str(current_user.user_id),
-                "repository": repo.model_dump(mode="json"),
+                "repository": workflow_repo_data,
             }
             handle = await temporal_client.start_workflow(
                 RepoIndexingWorkflow.run,
-                input,
+                input_data,
                 id=workflow_id,
                 task_queue="repo-indexing-queue",
             )

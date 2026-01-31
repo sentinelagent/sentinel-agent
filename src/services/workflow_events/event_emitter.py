@@ -197,20 +197,35 @@ class WorkflowEventEmitter:
 
             next_seq = (max_seq or 0) + 1
 
-            # Step 2: Insert event
+            # Step 2: Safe UUID conversion for DB columns
+            safe_user_id = None
+            if self.user_id:
+                try:
+                    safe_user_id = uuid.UUID(self.user_id) if isinstance(self.user_id, str) else self.user_id
+                except ValueError:
+                    logger.warning(f"Invalid user_id format: {self.user_id}")
+
+            safe_repo_id = None
+            if self.repo_id:
+                try:
+                    safe_repo_id = uuid.UUID(self.repo_id) if isinstance(self.repo_id, str) else self.repo_id
+                except ValueError:
+                    logger.warning(f"Invalid repo_id format: {self.repo_id}")
+
+            # Step 3: Insert event
             event = WorkflowRunEvent(
                 id=uuid.uuid4(),
                 workflow_id=self.workflow_id,
                 workflow_run_id=self.workflow_run_id,
                 workflow_type=self.workflow_type,
-                user_id=self.user_id,
+                user_id=safe_user_id,
                 installation_id=self.installation_id,
-                repo_id=self.repo_id,
+                repo_id=safe_repo_id,
                 sequence_number=next_seq,
                 activity_name=activity_name,
                 event_type=event_type.value,
                 message=message,
-                metadata=metadata,
+                event_metadata=metadata,
                 created_at=datetime.datetime.utcnow(),
             )
 

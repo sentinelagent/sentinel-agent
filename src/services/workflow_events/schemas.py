@@ -77,7 +77,9 @@ class WorkflowEvent(BaseModel):
     activity_name: Optional[str] = Field(None, description="Activity that emitted the event")
     event_type: WorkflowEventType = Field(..., description="Event type")
     message: str = Field(..., description="Human-readable message")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Activity-specific data")
+    event_metadata: Dict[str, Any] = Field(default_factory=dict, description="Activity-specific data")
+    progress: Optional[float] = Field(None, description="Progress percentage (0-100)")
+    status: Optional[str] = Field(None, description="Simplified status for frontend (started, in_progress, completed, failed)")
 
     created_at: datetime = Field(..., description="Event timestamp")
 

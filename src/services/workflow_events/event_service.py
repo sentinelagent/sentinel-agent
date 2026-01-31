@@ -36,6 +36,7 @@ class WorkflowEventService:
         self,
         workflow_id: str,
         user_id: str,
+        workflow_run_id: Optional[str] = None,
         since_sequence: int = 0,
         limit: int = 100,
     ) -> List[WorkflowEvent]:
@@ -50,6 +51,7 @@ class WorkflowEventService:
         Args:
             workflow_id: Temporal workflow ID
             user_id: User ID for authorization check
+            workflow_run_id: Optional Temporal run ID to filter events for a specific execution
             since_sequence: Fetch events after this sequence (for reconnection)
             limit: Maximum number of events to return (default 100)
 
@@ -63,12 +65,16 @@ class WorkflowEventService:
 
         try:
             # Step 1: Authorization check - verify user owns this workflow
-            # Check if any event in this workflow belongs to the user
+            # Build conditions for authorization check
+            auth_conditions = [
+                WorkflowRunEvent.workflow_id == workflow_id,
+                WorkflowRunEvent.user_id == user_id,
+            ]
+            if workflow_run_id:
+                auth_conditions.append(WorkflowRunEvent.workflow_run_id == workflow_run_id)
+
             ownership_check = db.query(WorkflowRunEvent).filter(
-                and_(
-                    WorkflowRunEvent.workflow_id == workflow_id,
-                    WorkflowRunEvent.user_id == user_id,
-                )
+                and_(*auth_conditions)
             ).first()
 
             if not ownership_check:
@@ -80,17 +86,22 @@ class WorkflowEventService:
                 # For SSE, we'll be permissive and return empty list
                 # The workflow will either emit events soon or the connection will timeout
                 logger.warning(
-                    f"No events found for workflow_id={workflow_id}, user_id={user_id}. "
-                    f"This may be a new workflow or authorization failure."
+                    f"No events found for workflow_id={workflow_id}, user_id={user_id}, "
+                    f"workflow_run_id={workflow_run_id}. This may be a new workflow or authorization failure."
                 )
                 return []
 
             # Step 2: Fetch events since sequence number
+            # Build query conditions
+            query_conditions = [
+                WorkflowRunEvent.workflow_id == workflow_id,
+                WorkflowRunEvent.sequence_number > since_sequence,
+            ]
+            if workflow_run_id:
+                query_conditions.append(WorkflowRunEvent.workflow_run_id == workflow_run_id)
+
             events = db.query(WorkflowRunEvent).filter(
-                and_(
-                    WorkflowRunEvent.workflow_id == workflow_id,
-                    WorkflowRunEvent.sequence_number > since_sequence,
-                )
+                and_(*query_conditions)
             ).order_by(
                 WorkflowRunEvent.sequence_number.asc()
             ).limit(limit).all()
@@ -106,7 +117,9 @@ class WorkflowEventService:
                     activity_name=event.activity_name,
                     event_type=event.event_type,
                     message=event.message,
-                    metadata=event.metadata,
+                    event_metadata=event.event_metadata,
+                    progress=event.event_metadata.get("progress"),
+                    status=event.event_metadata.get("status") or event.event_type,
                     created_at=event.created_at,
                 )
                 for event in events
@@ -114,7 +127,7 @@ class WorkflowEventService:
 
             logger.debug(
                 f"Fetched {len(result)} events for workflow_id={workflow_id}, "
-                f"user_id={user_id}, since_sequence={since_sequence}"
+                f"user_id={user_id}, workflow_run_id={workflow_run_id}, since_sequence={since_sequence}"
             )
 
             return result
@@ -122,7 +135,7 @@ class WorkflowEventService:
         except Exception as e:
             logger.error(
                 f"Failed to fetch events for workflow_id={workflow_id}, "
-                f"user_id={user_id}: {e}"
+                f"user_id={user_id}, workflow_run_id={workflow_run_id}: {e}"
             )
             raise
 

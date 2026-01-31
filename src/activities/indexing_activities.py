@@ -7,8 +7,30 @@ from temporalio import activity
 from src.activities.helpers import _deserialize_node, _deserialize_edge
 from src.services.indexing.repo_parsing_service import RepoParsingService
 from src.services.kg import KnowledgeGraphService
-from src.services.workflow_events import WorkflowEventEmitter
+from src.services.workflow_events import WorkflowEventEmitter, WorkflowEventType
 from src.utils.logging import get_logger
+from src.utils.retry import retry_with_backoff
+
+# Import Neo4j exceptions for retry logic
+try:
+    from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
+    NEO4J_RETRYABLE_EXCEPTIONS = (
+        ServiceUnavailable,
+        SessionExpired,
+        TransientError,
+        ConnectionError,
+        ConnectionResetError,
+        TimeoutError,
+        OSError,
+    )
+except ImportError:
+    NEO4J_RETRYABLE_EXCEPTIONS = (
+        ConnectionError,
+        ConnectionResetError,
+        TimeoutError,
+        OSError,
+    )
+
 logger = get_logger(__name__)
 
 
@@ -52,7 +74,8 @@ async def check_indexing_needed_activity(repo_request: dict) -> dict:
         try:
             await emitter.emit_started(
                 "check_indexing_needed_activity",
-                f"Checking if indexing needed for {repo_info['github_repo_name']}..."
+                f"Checking if indexing needed for {repo_info['github_repo_name']}...",
+                metadata={"progress": 2}
             )
         except Exception as e:
             logger.warning(f"Failed to emit started event: {e}")
@@ -92,7 +115,7 @@ async def check_indexing_needed_activity(repo_request: dict) -> dict:
                 await emitter.emit_completed(
                     "check_indexing_needed_activity",
                     f"Indexing required: SHA resolution failed",
-                    metadata={"reason": "sha_resolution_failed"}
+                    metadata={"reason": "sha_resolution_failed", "progress": 5}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -117,7 +140,7 @@ async def check_indexing_needed_activity(repo_request: dict) -> dict:
                 await emitter.emit_completed(
                     "check_indexing_needed_activity",
                     f"Indexing required: snapshot query failed",
-                    metadata={"reason": "snapshot_query_failed", "current_sha": current_sha}
+                    metadata={"reason": "snapshot_query_failed", "current_sha": current_sha, "progress": 5}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -141,7 +164,7 @@ async def check_indexing_needed_activity(repo_request: dict) -> dict:
                 await emitter.emit_completed(
                     "check_indexing_needed_activity",
                     f"Indexing required: no previous snapshot",
-                    metadata={"reason": "no_previous_snapshot", "current_sha": current_sha}
+                    metadata={"reason": "no_previous_snapshot", "current_sha": current_sha, "progress": 5}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -164,7 +187,7 @@ async def check_indexing_needed_activity(repo_request: dict) -> dict:
                 await emitter.emit_completed(
                     "check_indexing_needed_activity",
                     f"No indexing needed: SHA unchanged ({current_sha[:8]})",
-                    metadata={"reason": "sha_unchanged", "current_sha": current_sha}
+                    metadata={"reason": "sha_unchanged", "current_sha": current_sha, "progress": 100}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -187,7 +210,7 @@ async def check_indexing_needed_activity(repo_request: dict) -> dict:
             await emitter.emit_completed(
                 "check_indexing_needed_activity",
                 f"Indexing required: SHA changed from {latest_snapshot_sha[:8] if latest_snapshot_sha else 'None'} to {current_sha[:8]}",
-                metadata={"reason": "sha_changed", "current_sha": current_sha, "previous_sha": latest_snapshot_sha}
+                metadata={"reason": "sha_changed", "current_sha": current_sha, "previous_sha": latest_snapshot_sha, "progress": 10}
             )
         except Exception as emit_err:
             logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -234,7 +257,8 @@ async def clone_repo_activity(repo_request: dict) -> dict:
         try:
             await emitter.emit_started(
                 "clone_repo_activity",
-                f"Cloning {repo_info['github_repo_name']}..."
+                f"Cloning {repo_info['github_repo_name']}...",
+                metadata={"progress": 10}
             )
         except Exception as e:
             logger.warning(f"Failed to emit started event: {e}")
@@ -281,7 +305,7 @@ async def clone_repo_activity(repo_request: dict) -> dict:
                 await emitter.emit_failed(
                     "clone_repo_activity",
                     f"Clone failed: {str(e)}",
-                    metadata={"error": str(e)}
+                    metadata={"error": str(e), "progress": 10}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit failed event: {emit_err}")
@@ -332,7 +356,8 @@ async def parse_repo_activity(input_data: dict) -> dict:
         try:
             await emitter.emit_started(
                 "parse_repo_activity",
-                f"Parsing repository at {input_data['local_path']}..."
+                f"Parsing repository at {input_data['local_path']}...",
+                metadata={"progress": 30}
             )
         except Exception as e:
             logger.warning(f"Failed to emit started event: {e}")
@@ -374,8 +399,7 @@ async def parse_repo_activity(input_data: dict) -> dict:
                     metadata={
                         "total_symbols": graph_result.stats.total_symbols,
                         "indexed_files": graph_result.stats.indexed_files,
-                        "nodes": len(graph_result.nodes),
-                        "edges": len(graph_result.edges),
+                        "progress": 50
                     }
                 )
             except Exception as emit_err:
@@ -389,14 +413,14 @@ async def parse_repo_activity(input_data: dict) -> dict:
                 await emitter.emit_failed(
                     "parse_repo_activity",
                     f"Parsing failed: {str(e)}",
-                    metadata={"error": str(e)}
+                    metadata={"error": str(e), "progress": 30}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit failed event: {emit_err}")
 
         logger.error(f"Failed to parse repo: {e}")
         raise ApplicationError(f"Parsing failed: {e}") from e
-    
+
 # Postgres metadata persistence activity
 @activity.defn
 async def persist_metadata_activity(input_data: dict) -> dict:
@@ -432,7 +456,8 @@ async def persist_metadata_activity(input_data: dict) -> dict:
         try:
             await emitter.emit_started(
                 "persist_metadata_activity",
-                f"Saving metadata to Postgres..."
+                f"Saving metadata to Postgres...",
+                metadata={"progress": 90}
             )
         except Exception as e:
             logger.warning(f"Failed to emit started event: {e}")
@@ -460,7 +485,7 @@ async def persist_metadata_activity(input_data: dict) -> dict:
                 await emitter.emit_completed(
                     "persist_metadata_activity",
                     f"Saved metadata snapshot {snapshot_id[:8]}...",
-                    metadata={"snapshot_id": snapshot_id}
+                    metadata={"snapshot_id": snapshot_id, "progress": 95}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -473,7 +498,7 @@ async def persist_metadata_activity(input_data: dict) -> dict:
                 await emitter.emit_failed(
                     "persist_metadata_activity",
                     f"Metadata persistence failed: {str(e)}",
-                    metadata={"error": str(e)}
+                    metadata={"error": str(e), "progress": 90}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit failed event: {emit_err}")
@@ -519,7 +544,8 @@ async def persist_kg_activity(input_data: dict) -> dict:
         try:
             await emitter.emit_started(
                 "persist_kg_activity",
-                f"Persisting knowledge graph to Neo4j..."
+                f"Persisting knowledge graph to Neo4j...",
+                metadata={"progress": 60}
             )
         except Exception as e:
             logger.warning(f"Failed to emit started event: {e}")
@@ -532,10 +558,22 @@ async def persist_kg_activity(input_data: dict) -> dict:
 
     try:
         activity.heartbeat("Starting Neo4j persistence")
-        
+
+        # Retry callback to send heartbeats during retries
+        def on_neo4j_retry(exc: Exception, attempt: int, delay: float):
+            activity.heartbeat(f"Neo4j retry attempt {attempt}, waiting {delay:.1f}s...")
+            logger.info(f"Neo4j operation retry {attempt}: {exc}")
+
         # Delete existing graph for this repo (latest-only enforcement)
-        deleted_count = await service.delete_repo_graph(
-            repo_id=input_data["repo_id"]
+        # Using retry with exponential backoff for network resilience
+        deleted_count = await retry_with_backoff(
+            service.delete_repo_graph,
+            repo_id=input_data["repo_id"],
+            max_retries=3,
+            base_delay=1.0,
+            max_delay=15.0,
+            retryable_exceptions=NEO4J_RETRYABLE_EXCEPTIONS,
+            on_retry=on_neo4j_retry,
         )
         logger.info(
             f"Deleted {deleted_count} existing nodes for {input_data['github_repo_name']}"
@@ -546,7 +584,7 @@ async def persist_kg_activity(input_data: dict) -> dict:
                 await emitter.emit_progress(
                     "persist_kg_activity",
                     f"Deleted {deleted_count} old nodes, creating new graph...",
-                    metadata={"nodes_deleted": deleted_count}
+                    metadata={"nodes_deleted": deleted_count, "progress": 75}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit progress event: {emit_err}")
@@ -556,13 +594,21 @@ async def persist_kg_activity(input_data: dict) -> dict:
         nodes = [_deserialize_node(n) for n in input_data["graph_result"]["nodes"]]
         edges = [_deserialize_edge(e) for e in input_data["graph_result"]["edges"]]
 
-        # Persist new graph
-        result = await service.persist_kg(
+        activity.heartbeat("Persisting new graph to Neo4j")
+
+        # Persist new graph with retry logic
+        result = await retry_with_backoff(
+            service.persist_kg,
             repo_id=input_data["repo_id"],
             github_repo_id=input_data["github_repo_id"],
             nodes=nodes,
             edges=edges,
             commit_sha=commit_sha,
+            max_retries=3,
+            base_delay=1.0,
+            max_delay=15.0,
+            retryable_exceptions=NEO4J_RETRYABLE_EXCEPTIONS,
+            on_retry=on_neo4j_retry,
         )
 
         logger.info(
@@ -585,6 +631,7 @@ async def persist_kg_activity(input_data: dict) -> dict:
                         "nodes_created": result.nodes_created,
                         "edges_created": result.edges_created,
                         "nodes_deleted": deleted_count,
+                        "progress": 85
                     }
                 )
             except Exception as emit_err:
@@ -598,14 +645,14 @@ async def persist_kg_activity(input_data: dict) -> dict:
                 await emitter.emit_failed(
                     "persist_kg_activity",
                     f"Neo4j persistence failed: {str(e)}",
-                    metadata={"error": str(e)}
+                    metadata={"error": str(e), "progress": 60}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit failed event: {emit_err}")
 
         logger.error(f"Failed to persist KG: {e}")
         raise ApplicationError(f"Neo4j persistence failed: {e}") from e
-    
+
 # Cleanup repo activity
 @activity.defn
 async def cleanup_repo_activity(local_path: str) -> dict:
@@ -649,7 +696,7 @@ async def cleanup_repo_activity(local_path: str) -> dict:
                 await emitter.emit_completed(
                     "cleanup_repo_activity",
                     f"Cleaned up repository clone",
-                    metadata={"local_path": actual_path}
+                    metadata={"local_path": actual_path, "progress": 100}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -731,7 +778,7 @@ async def cleanup_stale_kg_nodes_activity(input_data: dict) -> dict:
                 await emitter.emit_completed(
                     "cleanup_stale_kg_nodes_activity",
                     f"Removed {nodes_deleted} stale nodes from Neo4j",
-                    metadata={"nodes_deleted": nodes_deleted, "ttl_days": ttl_days}
+                    metadata={"nodes_deleted": nodes_deleted, "ttl_days": ttl_days, "progress": 100}
                 )
             except Exception as emit_err:
                 logger.warning(f"Failed to emit completed event: {emit_err}")
@@ -751,3 +798,31 @@ async def cleanup_stale_kg_nodes_activity(input_data: dict) -> dict:
 
         logger.error(f"Failed to cleanup stale KG nodes: {e}")
         raise ApplicationError(f"Stale nodes cleanup failed: {e}") from e
+
+
+@activity.defn
+async def emit_workflow_event_activity(input_data: dict) -> None:
+    """
+    Emit a workflow-level event (started, completed, failed).
+
+    Args:
+        input_data: {
+            "event_type": str,
+            "message": str,
+            "metadata": dict (optional),
+            "event_context": dict
+        }
+    """
+    event_context = input_data.get("event_context")
+    if not event_context:
+        logger.warning("No event_context provided to emit_workflow_event_activity")
+        return
+
+    emitter = WorkflowEventEmitter(**event_context)
+    event_type = WorkflowEventType(input_data["event_type"])
+
+    await emitter.emit_workflow_event(
+        event_type=event_type,
+        message=input_data["message"],
+        metadata=input_data.get("metadata", {})
+    )

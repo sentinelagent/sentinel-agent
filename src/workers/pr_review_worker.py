@@ -1,5 +1,4 @@
 import asyncio
-from temporalio.client import Client
 from temporalio.worker import Worker
 from src.utils.logging.otel_logger import logger
 from src.workflows.pr_review_workflow import PRReviewWorkflow
@@ -15,12 +14,16 @@ from src.activities.pr_review_activities import (
     cleanup_pr_clone_activity,
 )
 from src.core.config import settings
+from src.core.temporal_client import connect_to_temporal_with_retry
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 
 async def main():
-    target_host=settings.TEMPORAL_SERVER_URL
-    client = await Client.connect(
+    target_host = settings.TEMPORAL_SERVER_URL
+    logger.info(f"Connecting to Temporal server at {target_host}...")
+
+    # Use retry logic to wait for Temporal to be available
+    client = await connect_to_temporal_with_retry(
         target_host=target_host,
         namespace='default'
     )

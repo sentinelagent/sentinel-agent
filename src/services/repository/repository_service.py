@@ -1,3 +1,4 @@
+import datetime
 from src.models.db.users import User
 from src.models.schemas.repositories import RepositoryRead, RepositoryCreate
 from src.utils.logging.otel_logger import logger
@@ -72,3 +73,57 @@ class RepositoryService:
         except Exception as e:
             logger.error(f"Unexpected error getting repositories for user {current_user.email}: {str(e)}")
             raise AppException(status_code=500, message="An unexpected error occurred while fetching repositories.")
+
+    def upsert_repository(self, installation_id: int, repo_data: Dict[str, Any]) -> Repository:
+        """
+        Create or update a repository record in the local database.
+        
+        Args:
+            installation_id: The GitHub installation ID
+            repo_data: Dictionary containing repository metadata
+            
+        Returns:
+            The Repository DB model instance
+        """
+        github_repo_id = repo_data["github_repo_id"]
+        full_name = repo_data["github_repo_name"]
+        
+        # Split owner/repo if possible
+        if "/" in full_name:
+            owner_login, name = full_name.split("/", 1)
+        else:
+            owner_login = "unknown"
+            name = full_name
+
+        try:
+            # Check if exists
+            repo = self.db.query(Repository).filter(Repository.github_repo_id == github_repo_id).first()
+            
+            if repo:
+                # Update existing
+                repo.name = name
+                repo.full_name = full_name
+                repo.owner_login = owner_login
+                repo.default_branch = repo_data.get("default_branch", repo.default_branch)
+                repo.installation_id = installation_id
+                repo.updated_at = datetime.datetime.utcnow()
+            else:
+                # Create new
+                repo = Repository(
+                    github_repo_id=github_repo_id,
+                    installation_id=installation_id,
+                    name=name,
+                    full_name=full_name,
+                    owner_login=owner_login,
+                    private=repo_data.get("private", False),
+                    default_branch=repo_data.get("default_branch", "main"),
+                )
+                self.db.add(repo)
+            
+            self.db.commit()
+            self.db.refresh(repo)
+            return repo
+        except SQLAlchemyError as e:
+            self.db.rollback()
+            logger.error(f"Failed to upsert repository {full_name}: {e}")
+            raise AppException(status_code=500, message=f"Database error during repository upsert: {str(e)}")

@@ -1,5 +1,6 @@
 import asyncio
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -104,6 +105,14 @@ async def lifespan(app: FastAPI):
 
 app_instance = FastAPIApp(lifespan=lifespan)
 app = app_instance.get_app()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 add_exception_handlers(app, logger)
 
