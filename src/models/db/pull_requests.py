@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, TIMESTAMP, text, ForeignKey, BigInteger
+from sqlalchemy import Column, String, TIMESTAMP, text, ForeignKey, BigInteger, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from src.core.database import Base
@@ -20,6 +20,11 @@ class PullRequest(Base):
     merged_at = Column(TIMESTAMP)
     created_at = Column(TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     updated_at = Column(TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+    # Unique constraint for repository + PR number combination
+    __table_args__ = (
+        UniqueConstraint('repository_id', 'pr_number', name='uq_repository_pr_number'),
+    )
 
     repository = relationship("Repository", back_populates="pull_requests")
     file_changes = relationship("PRFileChange", back_populates="pull_request")

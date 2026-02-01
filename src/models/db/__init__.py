@@ -15,6 +15,8 @@ from .symbols import Symbol
 from .symbol_embeddings import SymbolEmbedding
 from .symbol_edges import SymbolEdge
 from .workflow_run_events import WorkflowRunEvent
+from .context_templates import ContextTemplate
+from .repository_template_assignments import RepositoryTemplateAssignment
 
 # Export all models
 __all__ = [
@@ -34,4 +36,6 @@ __all__ = [
     'SymbolEmbedding',
     'SymbolEdge',
     'WorkflowRunEvent',
+    'ContextTemplate',
+    'RepositoryTemplateAssignment',
 ]

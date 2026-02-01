@@ -14,3 +14,8 @@ class User(Base):
 
     github_installations = relationship("GithubInstallation", back_populates="user")
     workflow_events = relationship("WorkflowRunEvent", back_populates="user")
+    context_templates = relationship(
+        "ContextTemplate",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )

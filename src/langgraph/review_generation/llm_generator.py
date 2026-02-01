@@ -245,21 +245,21 @@ class LLMGeneratorNode(BaseReviewGenerationNode):
 
     def _extract_json_from_response(self, content: str) -> Dict[str, Any]:
         """
-        Extract JSON from LLM response using multiple strategies.
-        
-        Strategies (in order):
+        Extract JSON from LLM response using optimized strategy order.
+
+        NEW ORDER (most reliable first):
         1. Direct JSON parse
-        2. Extract from ```json ... ``` fenced block
-        3. Extract from first { to last }
+        2. Extract from first { to last } (PROMOTED - most reliable)
+        3. Extract from ```json ... ``` fenced block (DEMOTED but improved regex)
         4. Try ast.literal_eval for python-dict syntax
         5. Attempt JSON repair
-        
+
         Args:
             content: Raw LLM response content
-            
+
         Returns:
             Parsed JSON as dict
-            
+
         Raises:
             LLMResponseParseError: If JSON cannot be extracted
         """
@@ -269,9 +269,10 @@ class LLMGeneratorNode(BaseReviewGenerationNode):
                 raw_response=content,
                 parse_error="Response is empty"
             )
-        
+
         content = content.strip()
-        
+        strategy_log = []
+
         # Handle empty context response format
         # When context_items is empty, LLM may return explanatory text instead of JSON
         if "no code changes" in content.lower() or "no context items" in content.lower():
@@ -285,75 +286,86 @@ class LLMGeneratorNode(BaseReviewGenerationNode):
                 "patterns": None,
                 "recommendations": None
             }
-        
+
         # Strategy 1: Direct JSON parse
         try:
-            return json.loads(content)
+            result = json.loads(content)
+            self.logger.info("[LLM_JSON] Strategy 1 succeeded: Direct parse")
+            return result
         except json.JSONDecodeError as e:
-            self.logger.debug(f"[LLM_JSON] Direct JSON parse failed: {e}")
-            pass
-        
-        # Strategy 2: Extract from ```json ... ``` fenced block
-        # Use greedy match to capture full JSON block, handle multiple ``` blocks
+            strategy_log.append(f"Strategy 1 (Direct parse) failed: {e}")
+            self.logger.debug(f"[LLM_JSON] Strategy 1 failed: {e}")
+
+        # Strategy 2: Extract from first { to last } (PROMOTED - most reliable)
+        first_brace = content.find('{')
+        last_brace = content.rfind('}')
+
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            json_substring = content[first_brace:last_brace + 1]
+            try:
+                result = json.loads(json_substring)
+                self.logger.info(f"[LLM_JSON] Strategy 2 succeeded: Brace extraction ({len(json_substring)} chars)")
+                return result
+            except json.JSONDecodeError as e:
+                strategy_log.append(f"Strategy 2 (Brace extraction) failed: {e}")
+                self.logger.debug(f"[LLM_JSON] Strategy 2 failed: {e}")
+        else:
+            strategy_log.append("Strategy 2 (Brace extraction) failed: No valid brace pair found")
+
+        # Strategy 3: Extract from markdown fence (DEMOTED but improved regex)
+        # Handles: ```json\n{...}\n```, ```json{...}```, ``` json\n{...}```
         json_block_match = re.search(
-            r'```(?:json)?\s*\n(.*?)\n```',
+            r'```(?:json)?\s*(.*?)\s*```',  # Removed \n requirements
             content,
             re.DOTALL | re.IGNORECASE
         )
         if json_block_match:
             try:
                 json_content = json_block_match.group(1).strip()
-                self.logger.debug(f"[LLM_JSON] Extracted JSON from code block: {len(json_content)} chars")
-                return json.loads(json_content)
+                result = json.loads(json_content)
+                self.logger.info("[LLM_JSON] Strategy 3 succeeded: Markdown fence")
+                return result
             except json.JSONDecodeError as e:
-                self.logger.debug(f"[LLM_JSON] Failed to parse extracted JSON block: {e}")
-                # Try to find JSON within the extracted block (in case there's extra text)
-                first_brace = json_content.find('{')
-                last_brace = json_content.rfind('}')
-                if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                    try:
-                        return json.loads(json_content[first_brace:last_brace + 1])
-                    except json.JSONDecodeError:
-                        pass
-                pass
-        
-        # Strategy 3: Extract from first { to last }
-        first_brace = content.find('{')
-        last_brace = content.rfind('}')
-        
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            json_substring = content[first_brace:last_brace + 1]
-            try:
-                return json.loads(json_substring)
-            except json.JSONDecodeError:
-                pass
-        
+                strategy_log.append(f"Strategy 3 (Markdown fence) failed: {e}")
+                self.logger.debug(f"[LLM_JSON] Strategy 3 failed: {e}")
+        else:
+            strategy_log.append("Strategy 3 (Markdown fence) failed: No markdown fence found")
+
         # Strategy 4: Try ast.literal_eval for python-dict syntax
         if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
             try:
                 dict_str = content[first_brace:last_brace + 1]
                 result = ast.literal_eval(dict_str)
                 if isinstance(result, dict):
+                    self.logger.info("[LLM_JSON] Strategy 4 succeeded: ast.literal_eval")
                     return result
-            except (ValueError, SyntaxError):
-                pass
-        
+                else:
+                    strategy_log.append(f"Strategy 4 (ast.literal_eval) failed: Result is {type(result).__name__}, not dict")
+            except (ValueError, SyntaxError) as e:
+                strategy_log.append(f"Strategy 4 (ast.literal_eval) failed: {e}")
+                self.logger.debug(f"[LLM_JSON] Strategy 4 failed: {e}")
+        else:
+            strategy_log.append("Strategy 4 (ast.literal_eval) failed: No valid brace pair found")
+
         # Strategy 5: Try to repair common JSON issues
         repaired = self._attempt_json_repair(content)
         if repaired is not None:
+            self.logger.info("[LLM_JSON] Strategy 5 succeeded: JSON repair")
             return repaired
-        
-        # All strategies failed - log full response for debugging
+        else:
+            strategy_log.append("Strategy 5 (JSON repair) failed: Could not repair JSON")
+
+        # All strategies failed - log comprehensive summary
         self.logger.error(
-            f"[LLM_JSON] All JSON extraction strategies failed. "
-            f"Response length: {len(content)} chars. "
-            f"First 1000 chars: {content[:1000]}"
+            f"[LLM_JSON] All strategies failed:\n" +
+            "\n".join(f"  - {log}" for log in strategy_log) +
+            f"\nResponse length: {len(content)} chars. First 1000 chars:\n{content[:1000]}"
         )
-        
+
         raise LLMResponseParseError(
-            "Failed to extract valid JSON from LLM response",
-            raw_response=content[:2000] if len(content) > 2000 else content,  # Show more for debugging
-            parse_error="No valid JSON found after all extraction strategies"
+            "All 5 JSON extraction strategies failed",
+            raw_response=content[:2000] if len(content) > 2000 else content,
+            parse_error="; ".join(strategy_log)
         )
 
     def _attempt_json_repair(self, content: str) -> Optional[Dict[str, Any]]:

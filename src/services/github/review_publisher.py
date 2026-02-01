@@ -170,13 +170,31 @@ class ReviewPublisher:
             f"{len(unanchored_findings)} unanchorable, "
             f"{stats.position_adjustments} adjustments applied"
         )
-        
+
+        # Validate all positions before GitHub API call
+        validated_comments, validation_warnings = self._validate_all_positions(
+            anchored_comments, patches
+        )
+
+        if validation_warnings:
+            logger.warning(
+                f"Position validation removed {len(validation_warnings)} invalid comments: "
+                f"{validation_warnings[:3]}{'...' if len(validation_warnings) > 3 else ''}"
+            )
+            # Move invalid comments' findings to unanchored
+            invalid_paths = {w.split(':')[0] for w in validation_warnings}
+            for comment in anchored_comments:
+                if comment not in validated_comments:
+                    unanchored_findings.append(comment.finding)
+
+        anchored_comments = validated_comments
+
         # Build review body (summary + unanchored findings)
         review_body = self._build_review_body(summary, unanchored_findings)
-        
+
         # Build inline comments payload
         comments_payload = self._build_comments_payload(anchored_comments)
-        
+
         # Build the review data for GitHub API
         review_data = {
             "commit_id": head_sha,
@@ -637,3 +655,63 @@ class ReviewPublisher:
     def _format_summary_finding(self, finding: Dict[str, Any]) -> str:
         """Format a finding for inclusion in the review summary."""
         return self._format_finding(finding, include_file_path=True, as_section=True)
+
+    def _validate_all_positions(
+        self,
+        anchored_comments: List[AnchoredComment],
+        patches: List[PRFilePatch]
+    ) -> Tuple[List[AnchoredComment], List[str]]:
+        """
+        Validate all positions before GitHub API call.
+
+        This is a final safety check to ensure all calculated positions
+        are valid for the GitHub API. Invalid positions cause 422 errors.
+
+        Checks:
+        1. Position > 0 (GitHub positions are 1-indexed)
+        2. Position <= total diff lines for the file
+        3. Path matches a valid patch file
+
+        Args:
+            anchored_comments: List of comments with calculated positions.
+            patches: List of PR file patches for validation.
+
+        Returns:
+            Tuple of:
+            - List of valid AnchoredComment objects
+            - List of warning messages for invalid positions
+        """
+        valid_comments = []
+        warnings = []
+
+        # Calculate total lines per file
+        file_line_counts: Dict[str, int] = {}
+        for patch in patches:
+            total = sum(len(hunk.lines) for hunk in patch.hunks)
+            file_line_counts[patch.file_path] = total
+
+        for comment in anchored_comments:
+            # Check position is positive
+            if comment.position <= 0:
+                warnings.append(
+                    f"{comment.path}: position {comment.position} must be positive (1-indexed)"
+                )
+                continue
+
+            # Check position doesn't exceed file total
+            max_pos = file_line_counts.get(comment.path, 0)
+            if max_pos == 0:
+                warnings.append(
+                    f"{comment.path}: file not found in patches"
+                )
+                continue
+
+            if comment.position > max_pos:
+                warnings.append(
+                    f"{comment.path}: position {comment.position} exceeds max {max_pos}"
+                )
+                continue
+
+            valid_comments.append(comment)
+
+        return valid_comments, warnings

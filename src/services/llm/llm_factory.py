@@ -140,7 +140,6 @@ class LLMFactory:
         if provider == LLMProvider.CLAUDE:
             api_key = os.getenv("ANTHROPIC_API_KEY", "")
         else:
-            # TODO: Remove hardcoded key before committing - LOCAL DEV ONLY
             api_key = os.getenv("GEMINI_API_KEY", "")
         
         return cls.create_client(
@@ -206,7 +205,6 @@ def get_llm_client(
         if provider_enum == LLMProvider.CLAUDE:
             api_key = os.getenv("ANTHROPIC_API_KEY", "")
         else:
-            # TODO: Remove hardcoded key before committing - LOCAL DEV ONLY
             api_key = os.getenv("GEMINI_API_KEY", "")
         
         return LLMFactory.create_client(

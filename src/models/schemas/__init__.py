@@ -13,6 +13,24 @@ from .repo_snapshots import RepoSnapshot
 from .symbols import Symbol
 from .symbol_embeddings import SymbolEmbedding
 from .symbol_edges import SymbolEdge
+from .context_templates import (
+    TemplateVisibility,
+    TemplateContentSchema,
+    ContextTemplateBase,
+    ContextTemplateCreate,
+    ContextTemplateUpdate,
+    ContextTemplateRead,
+    ContextTemplateList,
+    ContextTemplateSummary,
+    RepositoryTemplateAssignmentCreate,
+    RepositoryTemplateAssignmentUpdate,
+    RepositoryTemplateAssignmentRead,
+    RepositoryTemplateAssignmentWithTemplate,
+    RepositoryTemplatesResponse,
+    BulkAssignTemplatesRequest,
+    BulkAssignTemplatesResponse,
+    ReorderAssignmentsRequest,
+)
 
 # Export all models
 __all__ = [
@@ -30,4 +48,21 @@ __all__ = [
     'Symbol',
     'SymbolEmbedding',
     'SymbolEdge',
+    # Context Templates
+    'TemplateVisibility',
+    'TemplateContentSchema',
+    'ContextTemplateBase',
+    'ContextTemplateCreate',
+    'ContextTemplateUpdate',
+    'ContextTemplateRead',
+    'ContextTemplateList',
+    'ContextTemplateSummary',
+    'RepositoryTemplateAssignmentCreate',
+    'RepositoryTemplateAssignmentUpdate',
+    'RepositoryTemplateAssignmentRead',
+    'RepositoryTemplateAssignmentWithTemplate',
+    'RepositoryTemplatesResponse',
+    'BulkAssignTemplatesRequest',
+    'BulkAssignTemplatesResponse',
+    'ReorderAssignmentsRequest',
 ]

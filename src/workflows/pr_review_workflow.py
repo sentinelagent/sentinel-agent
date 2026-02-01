@@ -24,6 +24,7 @@ from src.activities.pr_review_activities import (
     clone_pr_head_activity,
     build_seed_set_activity,
     retrieve_kg_candidates_activity,
+    fetch_context_template_activity,
     retrieve_and_assemble_context_activity,
     generate_review_activity,
     persist_pr_review_metadata_activity,
@@ -108,6 +109,7 @@ class PRReviewWorkflow:
         clone_result = None
         seed_set_result = None
         kg_result = None
+        template_result = None
         context_result = None
         review_result = None
         publish_result = None
@@ -193,6 +195,31 @@ class PRReviewWorkflow:
             )
 
             # ====================================================================
+            # CONTEXT TEMPLATE RETRIEVAL
+            # ====================================================================
+
+            logger.info("Fetching context templates for repository")
+
+            template_input = {
+                "repo_id": str(request.repo_id),
+            }
+            template_result = await workflow.execute_activity(
+                fetch_context_template_activity,
+                template_input,
+                start_to_close_timeout=timedelta(seconds=30),  # Templates are lightweight DB queries
+                retry_policy=standard_retry
+            )
+
+            if template_result.get("has_template"):
+                template_metadata = template_result.get("template_metadata", {})
+                logger.info(
+                    f"Retrieved {template_metadata.get('templates_found', 0)} context template(s): "
+                    f"{', '.join(template_metadata.get('template_names', []))}"
+                )
+            else:
+                logger.info("No context templates assigned to repository")
+
+            # ====================================================================
             # PHASE 2: INTELLIGENT CONTEXT ASSEMBLY (LangGraph)
             # ====================================================================
 
@@ -237,8 +264,10 @@ class PRReviewWorkflow:
 
             logger.info("Phase 3: Starting AI review generation")
 
+            # Build review generation input with optional template content
             review_generation_input = {
-                "context_pack": context_pack
+                "context_pack": context_pack,
+                "context_template": template_result.get("template_content") if template_result.get("has_template") else None,
             }
             review_result = await workflow.execute_activity(
                 generate_review_activity,
@@ -363,7 +392,9 @@ class PRReviewWorkflow:
             elif not seed_set_result:
                 error_stage = "build_seed_set"
             elif not kg_result:
-                error_stage = "kg_retrieval" 
+                error_stage = "kg_retrieval"
+            elif not template_result:
+                error_stage = "fetch_context_template"
             elif not context_result:
                 error_stage = "context_assembly"
             elif not review_result:

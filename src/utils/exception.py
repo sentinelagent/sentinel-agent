@@ -29,9 +29,14 @@ class DuplicateResourceException(AppException):
         super().__init__(status_code=status.HTTP_409_CONFLICT, message=message)
 
 class UnauthorizedException(AppException):
-    """Raised for unauthorized access attempts."""
+    """Raised for authentication failures (user not authenticated)."""
     def __init__(self, message: str = "Unauthorized"):
         super().__init__(status_code=status.HTTP_401_UNAUTHORIZED, message=message)
+
+class ForbiddenException(AppException):
+    """Raised for authorization failures (user authenticated but lacks permission)."""
+    def __init__(self, message: str = "Forbidden"):
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, message=message)
 
 class InstallationNotFoundError(NotFoundException):
     def __init__(self, message: str = "Installation not found"):

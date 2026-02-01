@@ -64,6 +64,38 @@ class Neo4jPoolConfig(BaseModel):
         le=180
     )
 
+    # Retry configuration
+    max_init_retries: int = Field(
+        default=5,
+        description="Maximum initialization retry attempts",
+        ge=1,
+        le=10
+    )
+    init_retry_delay: float = Field(
+        default=2.0,
+        description="Initial retry delay in seconds",
+        ge=0.5,
+        le=10.0
+    )
+    init_retry_backoff: float = Field(
+        default=2.0,
+        description="Exponential backoff multiplier",
+        ge=1.0,
+        le=5.0
+    )
+    max_init_retry_delay: float = Field(
+        default=30.0,
+        description="Maximum retry delay in seconds",
+        ge=5.0,
+        le=120.0
+    )
+    health_check_failure_threshold: int = Field(
+        default=3,
+        description="Consecutive failures before marking unhealthy",
+        ge=1,
+        le=10
+    )
+
 
 @dataclass
 class ConnectionStats:
@@ -105,38 +137,57 @@ class Neo4jConnectionPool:
         self._health_check_task: Optional[asyncio.Task] = None
         self._query_times: list[float] = []
         self._initialized = False
+        self._consecutive_health_failures: int = 0
 
     async def initialize(self) -> None:
-        """Initialize the connection pool and start health monitoring."""
+        """Initialize with retry logic and validation."""
         if self._initialized:
             return
 
-        try:
-            logger.info(f"Initializing Neo4j connection pool to {self._config.uri}")
+        delay = self._config.init_retry_delay
 
-            # Create driver with connection pool settings
-            self._driver = GraphDatabase.async_driver(
-                self._config.uri,
-                auth=(self._config.username, self._config.password),
-                max_connection_lifetime=self._config.max_connection_lifetime,
-                max_connection_pool_size=self._config.max_connection_pool_size,
-                connection_acquisition_timeout=self._config.connection_acquisition_timeout,
-                max_transaction_retry_time=self._config.max_transaction_retry_time,
-            )
+        for attempt in range(1, self._config.max_init_retries + 1):
+            try:
+                logger.info(f"Initializing Neo4j pool (attempt {attempt}/{self._config.max_init_retries})")
 
-            # Verify connectivity
-            await self._verify_connectivity()
+                # Validate config first
+                self._validate_config()
 
-            # Start health monitoring
-            self._health_check_task = asyncio.create_task(self._health_check_loop())
+                # Create driver with connection pool settings
+                self._driver = GraphDatabase.async_driver(
+                    self._config.uri,
+                    auth=(self._config.username, self._config.password),
+                    max_connection_lifetime=self._config.max_connection_lifetime,
+                    max_connection_pool_size=self._config.max_connection_pool_size,
+                    connection_acquisition_timeout=self._config.connection_acquisition_timeout,
+                    max_transaction_retry_time=self._config.max_transaction_retry_time,
+                )
 
-            self._initialized = True
-            logger.info("Neo4j connection pool initialized successfully")
+                # Verify connectivity with timeout
+                await asyncio.wait_for(self._verify_connectivity(), timeout=30.0)
 
-        except Exception as e:
-            logger.error(f"Failed to initialize Neo4j connection pool: {e}", exc_info=True)
-            await self.close()
-            raise
+                # Start health monitoring
+                self._health_check_task = asyncio.create_task(self._health_check_loop())
+
+                self._initialized = True
+                logger.info(f"Neo4j pool initialized successfully (attempt {attempt})")
+                return
+
+            except Exception as e:
+                logger.warning(f"Initialization attempt {attempt} failed: {e}")
+                if self._driver:
+                    try:
+                        await self._driver.close()
+                    except Exception:
+                        pass
+                    self._driver = None
+
+                if attempt < self._config.max_init_retries:
+                    logger.info(f"Retrying in {delay:.1f}s...")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * self._config.init_retry_backoff, self._config.max_init_retry_delay)
+
+        raise RuntimeError(f"Failed to initialize Neo4j pool after {self._config.max_init_retries} attempts")
 
     async def close(self) -> None:
         """Close the connection pool and cleanup resources."""
@@ -157,6 +208,23 @@ class Neo4jConnectionPool:
 
         self._initialized = False
         logger.info("Neo4j connection pool closed")
+
+    def _validate_config(self) -> None:
+        """Validate Neo4j configuration before connecting."""
+        if not self._config.uri:
+            raise ValueError("Neo4j URI is required")
+
+        valid_prefixes = ('bolt://', 'neo4j://', 'bolt+s://', 'neo4j+s://')
+        if not self._config.uri.startswith(valid_prefixes):
+            raise ValueError(f"Invalid Neo4j URI: {self._config.uri}. Must start with {valid_prefixes}")
+
+        if not self._config.username:
+            raise ValueError("Neo4j username is required")
+
+        if not self._config.password:
+            raise ValueError("Neo4j password is required")
+
+        logger.debug(f"Neo4j config validated: uri={self._config.uri}, database={self._config.database}")
 
     @asynccontextmanager
     async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
@@ -271,7 +339,7 @@ class Neo4jConnectionPool:
                 self._stats.is_healthy = False
 
     async def _perform_health_check(self) -> None:
-        """Perform health check and update statistics."""
+        """Perform health check - require N consecutive failures before marking unhealthy."""
         try:
             start_time = time.time()
 
@@ -279,7 +347,8 @@ class Neo4jConnectionPool:
                 # Simple health check query
                 await session.run("RETURN 1 AS health_check")
 
-            # Update health statistics
+            # Reset failure counter on success
+            self._consecutive_health_failures = 0
             self._stats.last_health_check = time.time()
             self._stats.is_healthy = True
 
@@ -287,8 +356,20 @@ class Neo4jConnectionPool:
             logger.debug(f"Health check completed in {health_check_time:.1f}ms")
 
         except Exception as e:
-            self._stats.is_healthy = False
-            logger.warning(f"Health check failed: {e}")
+            self._consecutive_health_failures += 1
+
+            # Only mark unhealthy after N consecutive failures
+            if self._consecutive_health_failures >= self._config.health_check_failure_threshold:
+                self._stats.is_healthy = False
+                logger.error(
+                    f"Health check failed {self._consecutive_health_failures} times consecutively, "
+                    f"marking pool unhealthy: {e}"
+                )
+            else:
+                logger.warning(
+                    f"Health check failed ({self._consecutive_health_failures}/"
+                    f"{self._config.health_check_failure_threshold}): {e}"
+                )
 
     def get_stats(self) -> ConnectionStats:
         """Get current connection pool statistics."""
@@ -297,6 +378,20 @@ class Neo4jConnectionPool:
     def is_healthy(self) -> bool:
         """Check if the connection pool is healthy."""
         return self._stats.is_healthy and self._initialized
+
+    def get_diagnostic_info(self) -> Dict[str, Any]:
+        """Get diagnostic information about the pool for logging."""
+        return {
+            "initialized": self._initialized,
+            "healthy": self.is_healthy(),
+            "uri": self._config.uri,
+            "database": self._config.database,
+            "active_connections": self._stats.active_connections,
+            "total_queries": self._stats.total_queries,
+            "failed_queries": self._stats.failed_queries,
+            "avg_query_time_ms": round(self._stats.avg_query_time_ms, 2),
+            "consecutive_health_failures": self._consecutive_health_failures,
+        }
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -330,12 +425,15 @@ async def get_connection_pool() -> Neo4jConnectionPool:
     return _connection_pool
 
 
-async def initialize_connection_pool(config: Neo4jPoolConfig) -> None:
+async def initialize_connection_pool(config: Neo4jPoolConfig) -> Neo4jConnectionPool:
     """
     Initialize the global connection pool.
 
     Args:
         config: Neo4j pool configuration
+
+    Returns:
+        Neo4jConnectionPool: The initialized connection pool instance
     """
     global _connection_pool
 
@@ -344,6 +442,7 @@ async def initialize_connection_pool(config: Neo4jPoolConfig) -> None:
 
     _connection_pool = Neo4jConnectionPool(config)
     await _connection_pool.initialize()
+    return _connection_pool
 
 
 async def close_connection_pool() -> None:

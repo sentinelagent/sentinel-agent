@@ -115,12 +115,30 @@ class DiffPositionCalculator:
                 adjustment_applied=False,
                 failure_reason=validation_error
             )
-        
+
+        # Validate line is commentable (not a header or deletion)
+        adjustment_applied = False
+        is_valid, type_validation_error = self._validate_position_line_type(hunk, line_in_hunk)
+        if not is_valid:
+            logger.debug(f"Line {line_in_hunk} not commentable: {type_validation_error}")
+            adjusted_line = self._find_nearest_commentable_line(hunk, line_in_hunk)
+            if adjusted_line is None:
+                return PositionResult(
+                    position=None,
+                    adjusted_line_in_hunk=None,
+                    adjustment_applied=True,
+                    failure_reason=f"No valid nearby line: {type_validation_error}"
+                )
+            logger.debug(f"Adjusted line_in_hunk from {line_in_hunk} to {adjusted_line}")
+            line_in_hunk = adjusted_line
+            adjustment_applied = True
+
         # Check if target line is a removed line and adjust if needed
-        adjusted_line, adjustment_applied = self._adjust_for_removed_lines(
+        adjusted_line, removal_adjustment_applied = self._adjust_for_removed_lines(
             line_in_hunk, hunk
         )
-        
+        adjustment_applied = adjustment_applied or removal_adjustment_applied
+
         if adjusted_line is None:
             logger.debug(
                 f"Cannot comment on line {line_in_hunk} in hunk {hunk_id}: "
@@ -281,36 +299,114 @@ class DiffPositionCalculator:
     ) -> int:
         """
         Calculate the absolute diff position for GitHub API.
-        
+
+        CRITICAL: line_in_hunk is a 0-based index into PRHunk.lines where:
+        - Index 0: Hunk header (@@...@@)
+        - Index 1+: Actual diff content lines
+
+        GitHub position is 1-indexed counting from start of diff.
+        The hunk.lines array ALREADY includes the header at index 0,
+        so we must NOT add an extra +1 for the header.
+
         The position is calculated as:
-        - Sum of (1 + len(hunk.lines)) for all hunks before target hunk
-          (the +1 accounts for the @@ header line)
-        - Plus 1 for the target hunk's header
-        - Plus (line_in_hunk + 1) for the line within the target hunk
-        
+        - Sum of len(hunk.lines) for all hunks before target hunk
+          (hunk.lines already includes the header at index 0)
+        - Plus (line_in_hunk + 1) for the 1-indexed line within target hunk
+
         Args:
             patch: The file patch containing all hunks.
             target_hunk: The hunk containing the target line.
-            line_in_hunk: 0-based index into target_hunk.lines.
-        
+            line_in_hunk: 0-based index into target_hunk.lines (0 = header).
+
         Returns:
             1-indexed position for GitHub API.
         """
         position = 0
-        
+
         for hunk in patch.hunks:
             if hunk.hunk_id == target_hunk.hunk_id:
                 # We're at the target hunk
-                # Add 1 for the header line, then the line offset (1-indexed)
-                position += 1 + (line_in_hunk + 1)
+                # line_in_hunk already includes header at index 0
+                # Convert to 1-indexed: position + (line_in_hunk + 1)
+                position += (line_in_hunk + 1)
                 break
             else:
-                # Add this hunk's total contribution:
-                # 1 for header + number of content lines
-                position += 1 + len(hunk.lines)
-        
+                # Add entire hunk (header + content already in hunk.lines)
+                position += len(hunk.lines)
+
         return position
-    
+
+    def _validate_position_line_type(
+        self,
+        hunk: PRHunk,
+        line_in_hunk: int
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Validate that a line is commentable by GitHub.
+
+        GitHub allows comments on:
+        - Addition lines (+)
+        - Context lines (space prefix)
+
+        GitHub rejects comments on:
+        - Hunk headers (@@)
+        - Deletion lines (-)
+
+        Args:
+            hunk: The hunk containing the target line.
+            line_in_hunk: 0-based index into hunk.lines.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+            If valid, error_message is None.
+        """
+        if line_in_hunk < 0 or line_in_hunk >= len(hunk.lines):
+            return False, f"Index {line_in_hunk} out of range (hunk has {len(hunk.lines)} lines)"
+
+        line = hunk.lines[line_in_hunk]
+
+        if line.startswith('@@'):
+            return False, "Cannot comment on hunk header (@@)"
+        if line.startswith('-'):
+            return False, "Cannot comment on deletion line (-)"
+
+        return True, None
+
+    def _find_nearest_commentable_line(
+        self,
+        hunk: PRHunk,
+        line_in_hunk: int
+    ) -> Optional[int]:
+        """
+        Find the nearest valid line for commenting.
+
+        Searches forward first, then backward, skipping:
+        - Index 0 (hunk header)
+        - Deletion lines (-)
+
+        Args:
+            hunk: The hunk to search within.
+            line_in_hunk: Starting index to search from.
+
+        Returns:
+            Index of nearest commentable line, or None if none found.
+        """
+        lines = hunk.lines
+
+        # Search forward first
+        for i in range(line_in_hunk + 1, len(lines)):
+            is_valid, _ = self._validate_position_line_type(hunk, i)
+            if is_valid:
+                return i
+
+        # Search backward (skip index 0 which is the header)
+        for i in range(line_in_hunk - 1, 0, -1):
+            is_valid, _ = self._validate_position_line_type(hunk, i)
+            if is_valid:
+                return i
+
+        return None
+
     def calculate_position_for_finding(
         self,
         finding: dict,

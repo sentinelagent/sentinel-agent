@@ -7,6 +7,7 @@ class Repository(BaseModel):
     repo_url: str
     commit_sha: str | None = None  # Optional - if not provided, will use branch name
     default_branch: str = "main"
+    template_ids: list[str] = []
 
 class IndexRepoRequest(BaseModel):
     """Request model for repository indexing."""

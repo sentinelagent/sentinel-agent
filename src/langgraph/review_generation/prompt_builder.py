@@ -62,7 +62,7 @@ USER_PROMPT_TEMPLATE = dedent("""
     ## Focus Areas for Review
 
     {focus_areas}
-
+    {repository_guidelines_section}
     ## Evidence Sources (you MUST cite these by context_item_id)
 
     {context_items_section}
@@ -90,7 +90,23 @@ USER_PROMPT_TEMPLATE = dedent("""
     4. Provide an actionable suggested_fix
     5. Assign appropriate severity, category, and confidence
 
-    Generate your review findings as JSON:
+    ## CRITICAL OUTPUT FORMAT REQUIREMENTS
+
+    **You MUST return ONLY valid JSON matching the schema above.**
+
+    DO NOT include:
+    - Markdown code fences (```json ... ```)
+    - Explanatory text before or after JSON
+    - Comments or annotations
+
+    Return the JSON object directly, starting with {{ and ending with }}.
+
+    Example correct format:
+    {{"findings": [...], "summary": "..."}}
+
+    INCORRECT formats (DO NOT USE):
+    - ```json\n{{"findings": ...}}\n```
+    - Here is my review:\n{{"findings": ...}}
 """).strip()
 
 
@@ -199,10 +215,10 @@ class PromptBuilderNode(BaseReviewGenerationNode):
     async def _execute_node_logic(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Build structured prompt from analyzed context and diff mappings.
-        
+
         Args:
             state: Workflow state containing analyzed_context, diff_mappings, context_pack
-            
+
         Returns:
             Dict with structured_prompt key containing StructuredPrompt
         """
@@ -213,13 +229,14 @@ class PromptBuilderNode(BaseReviewGenerationNode):
         diff_mappings = state.get("diff_mappings", {})
         context_pack = state.get("context_pack", {})
 
-        # Get context items and patches
+        # Get context items and context template (if provided)
         context_items = context_pack.get("context_items", [])
-        patches = context_pack.get("patches", [])
+        context_template = context_pack.get("context_template")
 
         # Build prompt components
         technical_summary = self._build_technical_summary(analyzed_context)
         focus_areas = self._build_focus_areas_section(analyzed_context)
+        repository_guidelines = self._build_repository_guidelines_section(context_template)
         context_section, included_items = self._build_context_items_section(context_items)
         anchors_section, anchor_count = self._build_allowed_anchors_section(diff_mappings)
         schema_json = json.dumps(OUTPUT_SCHEMA, indent=2)
@@ -229,6 +246,7 @@ class PromptBuilderNode(BaseReviewGenerationNode):
         user_prompt = USER_PROMPT_TEMPLATE.format(
             technical_summary=technical_summary,
             focus_areas=focus_areas,
+            repository_guidelines_section=repository_guidelines,
             context_items_section=context_section,
             allowed_anchors_section=anchors_section,
             output_schema=schema_json,
@@ -322,13 +340,100 @@ class PromptBuilderNode(BaseReviewGenerationNode):
         
         return "\n".join(lines)
 
+    def _build_repository_guidelines_section(
+        self,
+        context_template: Optional[Dict[str, Any]]
+    ) -> str:
+        """
+        Build repository-specific guidelines section from context template.
+
+        The context template contains review guidelines, coding standards, focus areas,
+        and custom instructions configured by the repository owner.
+
+        Args:
+            context_template: Template content dict with optional keys:
+                - guidelines: List of review guidelines
+                - coding_standards: Dict of coding standards
+                - focus_areas: List of areas to focus on
+                - additional_context: Free-form instructions
+
+        Returns:
+            Formatted guidelines section string, or empty string if no template
+        """
+        if not context_template:
+            return ""
+
+        lines = ["\n## Repository-Specific Guidelines\n"]
+        has_content = False
+
+        # Add guidelines
+        guidelines = context_template.get("guidelines", [])
+        if guidelines:
+            has_content = True
+            lines.append("**Review Guidelines:**")
+            for guideline in guidelines[:10]:  # Limit to 10 guidelines
+                lines.append(f"- {guideline}")
+            lines.append("")
+
+        # Add focus areas from template (supplement to analyzed context focus areas)
+        template_focus_areas = context_template.get("focus_areas", [])
+        if template_focus_areas:
+            has_content = True
+            lines.append("**Additional Focus Areas:**")
+            for area in template_focus_areas[:5]:  # Limit to 5
+                lines.append(f"- {area}")
+            lines.append("")
+
+        # Add coding standards
+        coding_standards = context_template.get("coding_standards", {})
+        if coding_standards:
+            has_content = True
+            lines.append("**Coding Standards:**")
+            for standard_name, standard_value in list(coding_standards.items())[:8]:  # Limit to 8
+                if isinstance(standard_value, dict):
+                    lines.append(f"- **{standard_name}**: {standard_value.get('description', str(standard_value))}")
+                else:
+                    lines.append(f"- **{standard_name}**: {standard_value}")
+            lines.append("")
+
+        # Add custom rules
+        custom_rules = context_template.get("custom_rules", [])
+        if custom_rules:
+            has_content = True
+            lines.append("**Custom Rules:**")
+            for rule in custom_rules[:5]:  # Limit to 5 rules
+                if isinstance(rule, dict):
+                    rule_name = rule.get("name", "Rule")
+                    rule_desc = rule.get("description", str(rule))
+                    lines.append(f"- **{rule_name}**: {rule_desc}")
+                else:
+                    lines.append(f"- {rule}")
+            lines.append("")
+
+        # Add additional context (free-form instructions)
+        additional_context = context_template.get("additional_context", "")
+        if additional_context:
+            has_content = True
+            lines.append("**Additional Instructions:**")
+            # Limit additional context length
+            truncated_context = additional_context[:1000]
+            if len(additional_context) > 1000:
+                truncated_context += "... [truncated]"
+            lines.append(truncated_context)
+            lines.append("")
+
+        if not has_content:
+            return ""
+
+        return "\n".join(lines)
+
     def _build_context_items_section(
-        self, 
+        self,
         context_items: List[Dict[str, Any]]
     ) -> Tuple[str, int]:
         """
         Build context items section with IDs for citation.
-        
+
         Returns:
             Tuple of (formatted section string, number of items included)
         """

@@ -182,11 +182,18 @@ class DiffProcessorNode(BaseReviewGenerationNode):
     ) -> Tuple[Optional[HunkMapping], Dict[int, Tuple[str, int]]]:
         """
         Process a single hunk and build its mapping.
-        
+
+        CRITICAL: hunk_data['lines'] includes the header at index 0:
+        - Index 0: Header (@@...@@) - must be skipped
+        - Index 1+: Content lines (additions, deletions, context)
+
+        This ensures added_line_indexes never contains index 0, which would
+        cause GitHub 422 errors when calculating diff positions.
+
         Args:
             file_path: The file path this hunk belongs to
             hunk_data: PRHunk dict data
-            
+
         Returns:
             Tuple of (HunkMapping, line_lookup dict for this hunk)
         """
@@ -208,8 +215,14 @@ class DiffProcessorNode(BaseReviewGenerationNode):
 
         # Track current line number in new file
         current_new_line = new_start
-        
+
+        # Process lines - SKIP INDEX 0 (header line @@...@@)
         for line_index, line in enumerate(lines):
+            if line_index == 0:
+                # Header line (@@...@@) - skip it
+                # GitHub does not allow comments on header lines
+                continue
+
             if not line:
                 # Empty line - treat as context
                 line_lookup[current_new_line] = (hunk_id, line_index)

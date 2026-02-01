@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from fastapi.exceptions import HTTPException
 from temporalio.client import Client
 from src.api.fastapi.middlewares.auth import get_current_user
@@ -8,6 +8,7 @@ from src.utils.response import IndexRepoResponse, IndexRepoResponseItem
 from src.utils.requests import IndexRepoRequest
 from src.workflows.repo_indexing_workflow import RepoIndexingWorkflow
 from src.services.repository.repository_service import RepositoryService
+from src.models.schemas.context_templates import BulkAssignTemplatesRequest
 
 router = APIRouter(prefix="/indexing", tags=["Indexing"])
 
@@ -37,6 +38,19 @@ async def index_repo(
                 installation_id=repo_request.installation_id,
                 repo_data=repo.model_dump()
             )
+
+            # Step 1.5: Handle template assignments if provided
+            if repo.template_ids:
+                from src.services.context_templates.context_template_service import ContextTemplateService
+                template_service = ContextTemplateService(repo_service.db)
+                template_service.bulk_assign_templates(
+                    repository_id=db_repo.id,
+                    user=current_user,
+                    data=BulkAssignTemplatesRequest(
+                        template_ids=repo.template_ids,
+                        replace_existing=True
+                    )
+                )
             
             # Step 2: Use the local DB UUID for repo_id in the workflow
             workflow_repo_data = repo.model_dump(mode="json")

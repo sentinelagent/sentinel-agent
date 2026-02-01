@@ -23,7 +23,8 @@ from src.langgraph.review_generation.circuit_breaker import CircuitBreaker
 from src.langgraph.review_generation.exceptions import (
     WorkflowNodeError,
     WorkflowStateError,
-    ReviewGenerationError
+    ReviewGenerationError,
+    LLMResponseParseError
 )
 from src.langgraph.review_generation.schema import ReviewGenerationState
 
@@ -408,6 +409,14 @@ class BaseReviewGenerationNode(ABC, Generic[StateType, ResultType]):
 
         # Don't retry review generation errors marked as non-recoverable
         if isinstance(error, ReviewGenerationError) and not error.recoverable:
+            return False
+
+        # Don't retry parse errors - all 5 extraction strategies already exhausted
+        if isinstance(error, LLMResponseParseError):
+            self.logger.info(
+                "[LLM_JSON] Not retrying LLMResponseParseError - "
+                "all 5 JSON extraction strategies already exhausted"
+            )
             return False
 
         return True

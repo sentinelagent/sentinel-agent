@@ -6,7 +6,7 @@ from typing import Any, Iterable, Optional
 
 from neo4j import AsyncDriver
 
-from src.services.kg.connection_pool import Neo4jConnectionPool, get_connection_pool
+from src.services.kg.connection_pool import get_connection_pool
 from src.services.kg.query_builder import KGQueryBuilder
 from src.services.kg.performance_monitor import get_performance_monitor
 from src.utils.logging import get_logger
@@ -58,7 +58,7 @@ class KGQueryService:
         params: Optional[dict[str, Any]] = None
     ) -> list[dict[str, Any]]:
         """
-        Execute a query using connection pool or fallback to direct driver.
+        Execute a query using connection pool with fallback to direct driver.
 
         Args:
             query: Cypher query string
@@ -68,24 +68,33 @@ class KGQueryService:
             List of query result records
 
         Raises:
-            Exception: If query execution fails
+            RuntimeError: If no connection is available
         """
+        pool_error = None
+
+        # Try connection pool first
         try:
-            # Try to use connection pool first
             pool = await get_connection_pool()
             if pool and pool.is_healthy():
                 return await pool.execute_query(query, params, timeout=30)
-
+        except RuntimeError as e:
+            pool_error = str(e)
+            logger.debug(f"Pool unavailable: {pool_error}")
         except Exception as e:
-            logger.debug(f"Connection pool unavailable, falling back to direct driver: {e}")
+            pool_error = f"{type(e).__name__}: {e}"
+            logger.warning(f"Pool error, falling back to direct driver: {pool_error}")
 
         # Fallback to direct driver connection
-        if not self._driver:
-            raise RuntimeError("No Neo4j driver available")
+        if self._driver:
+            logger.debug("Using direct driver for query")
+            async with self._driver.session(database=self._database) as session:
+                result = await session.run(query, params or {})
+                return [dict(record) async for record in result]
 
-        async with self._driver.session(database=self._database) as session:
-            result = await session.run(query, params or {})
-            return [dict(record) async for record in result]
+        # No connection available
+        error_msg = f"No Neo4j connection available. Pool: {pool_error or 'not initialized'}, Driver: None"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
         
     async def get_repo_commit_sha(self, repo_id: str) -> Optional[str]:
         """

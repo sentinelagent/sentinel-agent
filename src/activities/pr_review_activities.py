@@ -420,6 +420,176 @@ async def retrieve_kg_candidates_activity(input_data: Dict[str, Any]) -> Dict[st
 
     return result
 
+
+# ============================================================================
+# CONTEXT TEMPLATE RETRIEVAL ACTIVITY
+# ============================================================================
+
+@activity.defn
+async def fetch_context_template_activity(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fetch context template(s) assigned to the repository for use in review generation.
+
+    This activity retrieves templates from the database and formats them for inclusion
+    in the LLM prompt during review generation. Templates provide repository-specific
+    review guidelines, coding standards, focus areas, and custom instructions.
+
+    Note: This activity creates its own database session (not using FastAPI's Depends)
+    to comply with Temporal activity requirements.
+
+    Args:
+        input_data: Contains:
+            - repo_id: Internal repository UUID string
+
+    Returns:
+        Dict containing:
+            - has_template: bool - Whether any templates were found
+            - template_content: Dict or None - Combined template configuration
+            - template_metadata: Dict - Metadata about retrieved templates
+    """
+    from src.core.database import SessionLocal
+    from src.models.db.context_templates import ContextTemplate
+    from src.models.db.repository_template_assignments import RepositoryTemplateAssignment
+    from sqlalchemy.orm import joinedload
+
+    repo_id = input_data["repo_id"]
+
+    logger.info(f"Fetching context templates for repository {repo_id}")
+
+    db = SessionLocal()
+    try:
+        # Query active template assignments for this repository, ordered by priority
+        assignments = db.query(RepositoryTemplateAssignment).options(
+            joinedload(RepositoryTemplateAssignment.template)
+        ).filter(
+            RepositoryTemplateAssignment.repository_id == repo_id,
+            RepositoryTemplateAssignment.is_active == True
+        ).order_by(
+            RepositoryTemplateAssignment.priority.asc()
+        ).all()
+
+        if not assignments:
+            logger.info(f"No context templates assigned to repository {repo_id}")
+            return {
+                "has_template": False,
+                "template_content": None,
+                "template_metadata": {
+                    "templates_found": 0,
+                    "template_ids": [],
+                    "template_names": [],
+                }
+            }
+
+        # Extract active templates from assignments
+        templates = []
+        for assignment in assignments:
+            if assignment.template and assignment.template.is_active:
+                templates.append(assignment.template)
+
+        if not templates:
+            logger.info(f"No active templates found for repository {repo_id}")
+            return {
+                "has_template": False,
+                "template_content": None,
+                "template_metadata": {
+                    "templates_found": 0,
+                    "template_ids": [],
+                    "template_names": [],
+                }
+            }
+
+        # Combine template contents (in priority order)
+        # Later templates can override earlier ones for same-named fields
+        combined_content = {
+            "guidelines": [],
+            "coding_standards": {},
+            "custom_rules": [],
+            "focus_areas": [],
+            "ignore_patterns": [],
+            "additional_context": "",
+        }
+
+        template_ids = []
+        template_names = []
+
+        for template in templates:
+            template_ids.append(str(template.id))
+            template_names.append(template.name)
+            content = template.template_content or {}
+
+            # Merge guidelines (append)
+            if "guidelines" in content and content["guidelines"]:
+                combined_content["guidelines"].extend(content["guidelines"])
+
+            # Merge coding standards (update/merge dicts)
+            if "coding_standards" in content and content["coding_standards"]:
+                combined_content["coding_standards"].update(content["coding_standards"])
+
+            # Merge custom rules (append)
+            if "custom_rules" in content and content["custom_rules"]:
+                combined_content["custom_rules"].extend(content["custom_rules"])
+
+            # Merge focus areas (append, deduplicate later)
+            if "focus_areas" in content and content["focus_areas"]:
+                combined_content["focus_areas"].extend(content["focus_areas"])
+
+            # Merge ignore patterns (append)
+            if "ignore_patterns" in content and content["ignore_patterns"]:
+                combined_content["ignore_patterns"].extend(content["ignore_patterns"])
+
+            # Merge additional context (concatenate with newlines)
+            if "additional_context" in content and content["additional_context"]:
+                if combined_content["additional_context"]:
+                    combined_content["additional_context"] += "\n\n"
+                combined_content["additional_context"] += content["additional_context"]
+
+        # Deduplicate focus areas while preserving order
+        seen_focus_areas = set()
+        unique_focus_areas = []
+        for area in combined_content["focus_areas"]:
+            if area not in seen_focus_areas:
+                seen_focus_areas.add(area)
+                unique_focus_areas.append(area)
+        combined_content["focus_areas"] = unique_focus_areas
+
+        # Deduplicate ignore patterns
+        combined_content["ignore_patterns"] = list(set(combined_content["ignore_patterns"]))
+
+        logger.info(
+            f"Retrieved {len(templates)} context template(s) for repository {repo_id}: "
+            f"{', '.join(template_names)}"
+        )
+
+        return {
+            "has_template": True,
+            "template_content": combined_content,
+            "template_metadata": {
+                "templates_found": len(templates),
+                "template_ids": template_ids,
+                "template_names": template_names,
+            }
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Failed to fetch context templates for repository {repo_id}: {e}",
+            exc_info=True
+        )
+        # Return graceful fallback - don't fail the workflow for missing templates
+        return {
+            "has_template": False,
+            "template_content": None,
+            "template_metadata": {
+                "templates_found": 0,
+                "template_ids": [],
+                "template_names": [],
+                "error": str(e),
+            }
+        }
+    finally:
+        db.close()
+
+
 # ============================================================================
 # PHASE 2: CONTEXT ASSEMBLY ACTIVITIES (LangGraph)
 # ============================================================================
@@ -667,7 +837,9 @@ async def generate_review_activity(input_data: Dict[str, Any]) -> Dict[str, Any]
     6. QualityValidatorNode: Filter, validate, produce final output
 
     Args:
-        input_data: Contains context_pack for LLM analysis
+        input_data: Contains:
+            - context_pack: Assembled context for LLM analysis
+            - context_template: Optional template content with review guidelines
 
     Returns:
         ReviewGenerationOutput with structured LLM findings
@@ -679,11 +851,21 @@ async def generate_review_activity(input_data: Dict[str, Any]) -> Dict[str, Any]
     import time
 
     context_pack = input_data["context_pack"]
+    context_template = input_data.get("context_template")  # Optional template content
     patches = context_pack.get("patches", [])
 
     # Extract PR metadata for logging
     pr_info = f"{context_pack.get('github_repo_name', 'unknown')}#{context_pack.get('pr_number', '?')}"
     context_items_count = len(context_pack.get("context_items", []))
+
+    # If context template is provided, inject it into context_pack for prompt building
+    if context_template:
+        context_pack["context_template"] = context_template
+        logger.info(
+            f"Injecting context template into review generation for {pr_info}: "
+            f"guidelines={len(context_template.get('guidelines', []))}, "
+            f"focus_areas={len(context_template.get('focus_areas', []))}"
+        )
 
     logger.info(
         f"Starting review generation for {pr_info} with "
@@ -1214,8 +1396,9 @@ PR_REVIEW_ACTIVITIES = [
     clone_pr_head_activity,
     build_seed_set_activity,
 
-    # Phase 2: KG retrieval
+    # Phase 2: KG retrieval + Template retrieval
     retrieve_kg_candidates_activity,
+    fetch_context_template_activity,
 
     # Phase 3: Context assembly (LangGraph)
     retrieve_and_assemble_context_activity,

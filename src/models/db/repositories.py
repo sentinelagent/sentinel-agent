@@ -25,3 +25,8 @@ class Repository(Base):
     automation_workflows = relationship("AutomationWorkflow", back_populates="repository")
     pull_requests = relationship("PullRequest", back_populates="repository")
     workflow_events = relationship("WorkflowRunEvent", back_populates="repository")
+    template_assignments = relationship(
+        "RepositoryTemplateAssignment",
+        back_populates="repository",
+        cascade="all, delete-orphan"
+    )

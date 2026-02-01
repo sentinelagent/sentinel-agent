@@ -1,5 +1,9 @@
 import os
 from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+
+# Load .env file into environment variables so os.getenv() works
+load_dotenv()
 
 
 class Settings(BaseSettings):
