@@ -18,6 +18,7 @@ from src.exceptions.pr_review_exceptions import (
     GitHubRateLimitException,
     GitHubAuthenticationException,
     GitHubPermissionException,
+    CommentNotFoundException,
     is_retryable_github_error,
     get_retry_delay_seconds
 )
@@ -269,6 +270,106 @@ class PRApiClient:
                     f"Insufficient permissions to create review for {repo_name}#{pr_number}"
                 )
             raise self._handle_http_error(e, f"create review for {repo_name}#{pr_number}")
+
+    async def get_review_comment(
+        self,
+        repo_name: str,
+        comment_id: int,
+        installation_id: int,
+    ) -> Dict[str, Any]:
+        """
+        Get a single pull request review comment.
+
+        Args:
+            repo_name: Repository name in format "owner/repo"
+            comment_id: Review comment ID
+            installation_id: GitHub installation ID for authentication
+
+        Returns:
+            Review comment object
+        """
+        endpoint = f"/repos/{repo_name}/pulls/comments/{comment_id}"
+
+        try:
+            return await self._make_api_request(
+                method="GET",
+                endpoint=endpoint,
+                installation_id=installation_id,
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise CommentNotFoundException(comment_id)
+            raise self._handle_http_error(e, f"get review comment {comment_id}")
+
+    async def list_review_comments(
+        self,
+        repo_name: str,
+        pr_number: int,
+        installation_id: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        List review comments for a pull request.
+
+        Args:
+            repo_name: Repository name in format "owner/repo"
+            pr_number: Pull request number
+            installation_id: GitHub installation ID for authentication
+
+        Returns:
+            List of review comment objects
+        """
+        endpoint = f"/repos/{repo_name}/pulls/{pr_number}/comments"
+
+        try:
+            return await self._make_api_request(
+                method="GET",
+                endpoint=endpoint,
+                installation_id=installation_id,
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise GitHubPRNotFoundException(repo_name, pr_number)
+            raise self._handle_http_error(e, f"list review comments for {repo_name}#{pr_number}")
+
+    async def create_review_comment_reply(
+        self,
+        repo_name: str,
+        pr_number: int,
+        comment_id: int,
+        body: str,
+        installation_id: int,
+    ) -> Dict[str, Any]:
+        """
+        Reply to a pull request review comment.
+
+        Args:
+            repo_name: Repository name in format "owner/repo"
+            pr_number: Pull request number
+            comment_id: Review comment ID to reply to
+            body: Reply body
+            installation_id: GitHub installation ID for authentication
+
+        Returns:
+            Created reply comment object
+        """
+        endpoint = f"/repos/{repo_name}/pulls/{pr_number}/comments/{comment_id}/replies"
+        payload = {"body": body}
+
+        try:
+            return await self._make_api_request(
+                method="POST",
+                endpoint=endpoint,
+                installation_id=installation_id,
+                json_data=payload,
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise GitHubPRNotFoundException(repo_name, pr_number)
+            if e.response.status_code == 403:
+                raise GitHubPermissionException(
+                    f"Insufficient permissions to reply to comment {comment_id}"
+                )
+            raise self._handle_http_error(e, f"reply to review comment {comment_id}")
 
     async def _make_api_request(
         self,

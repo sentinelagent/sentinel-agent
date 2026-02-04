@@ -1,4 +1,5 @@
 from typing import Dict, Any, Optional
+import re
 from fastapi import Depends
 from fastapi.responses import RedirectResponse
 from pydantic import ValidationError
@@ -14,6 +15,8 @@ import httpx
 from src.utils.exception import AppException, BadRequestException
 from src.models.schemas.users import User as UserSchema
 from src.models.schemas.github_installations import InstallationEvent
+
+MENTION_PATTERN = re.compile(r"@sentinel\b", re.IGNORECASE)
 
 
 class GithubService:
@@ -146,6 +149,11 @@ class GithubService:
                 result = await self._handle_pull_request_webhook(body)
                 if result:
                     return result
+
+            elif event_type == "pull_request_review_comment":
+                result = await self._handle_comment_mention_webhook(body)
+                if result:
+                    return result
                 
             else:
                 logger.info(f"Unhandled webhook event type: {event_type}")
@@ -165,6 +173,117 @@ class GithubService:
             if not isinstance(e, AppException):
                 raise AppException(status_code=500, message=f"Failed to process webhook '{event_type}'")
             raise e
+
+    async def _handle_comment_mention_webhook(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Handle pull_request_review_comment webhook events for @sentinel mentions.
+
+        Triggers PRCommentAssistWorkflow when a comment contains @sentinel.
+        """
+        from src.core.temporal_client import temporal_client
+        from src.models.schemas.pr_review.comment_assist import PRCommentAssistRequest
+        from src.workflows.comment_assist_workflow import (
+            PRCommentAssistWorkflow,
+            create_comment_assist_task_queue,
+            create_comment_assist_workflow_id,
+        )
+
+        action = payload.get("action")
+        if action != "created":
+            logger.info(f"Ignoring pull_request_review_comment action: {action}")
+            return None
+
+        comment = payload.get("comment", {})
+        comment_body = comment.get("body", "")
+        comment_user = comment.get("user", {})
+        comment_user_type = comment_user.get("type", "")
+
+        if comment_user_type.lower() == "bot":
+            logger.info("Ignoring bot-authored comment")
+            return {"status": "ignored", "reason": "bot_comment"}
+
+        if not MENTION_PATTERN.search(comment_body or ""):
+            return None
+
+        pr_data = payload.get("pull_request", {})
+        repo_data = payload.get("repository", {})
+        installation_data = payload.get("installation", {})
+
+        pr_number = pr_data.get("number")
+        head_sha = pr_data.get("head", {}).get("sha")
+        base_sha = pr_data.get("base", {}).get("sha")
+        github_repo_id = repo_data.get("id")
+        github_repo_name = repo_data.get("full_name")
+        installation_id = installation_data.get("id")
+
+        comment_id = comment.get("id")
+        in_reply_to_id = comment.get("in_reply_to_id")
+
+        if not all([pr_number, head_sha, base_sha, github_repo_id, github_repo_name, installation_id, comment_id]):
+            logger.warning(
+                "Missing required fields in comment webhook: "
+                f"pr_number={pr_number}, head_sha={head_sha}, base_sha={base_sha}, "
+                f"github_repo_id={github_repo_id}, installation_id={installation_id}, comment_id={comment_id}"
+            )
+            return {"status": "ignored", "reason": "missing_required_fields"}
+
+        repository = self.db.query(Repository).filter(
+            Repository.github_repo_id == github_repo_id
+        ).first()
+
+        if not repository:
+            logger.warning(
+                f"Repository not found in database: github_repo_id={github_repo_id}, "
+                f"name={github_repo_name}. Repository may not be indexed yet."
+            )
+            return {
+                "status": "ignored",
+                "reason": f"Repository {github_repo_name} not indexed yet",
+            }
+
+        try:
+            request = PRCommentAssistRequest(
+                installation_id=installation_id,
+                repo_id=repository.id,
+                github_repo_id=github_repo_id,
+                github_repo_name=github_repo_name,
+                pr_number=pr_number,
+                comment_id=comment_id,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                in_reply_to_id=in_reply_to_id,
+            )
+        except ValidationError as e:
+            logger.error(f"Failed to build PRCommentAssistRequest: {e}")
+            return {"status": "error", "reason": f"Invalid comment data: {e}"}
+
+        try:
+            client = await temporal_client.get_client()
+            workflow_id = create_comment_assist_workflow_id(comment_id)
+            handle = await client.start_workflow(
+                PRCommentAssistWorkflow.run,
+                request,
+                id=workflow_id,
+                task_queue=create_comment_assist_task_queue(),
+            )
+
+            logger.info(
+                f"Started comment assist workflow {workflow_id} for "
+                f"{github_repo_name}#{pr_number} comment {comment_id}"
+            )
+
+            return {
+                "status": "success",
+                "message": f"Comment assist workflow started for {github_repo_name}#{pr_number}",
+                "workflow_id": workflow_id,
+                "run_id": str(handle.first_execution_run_id or ""),
+            }
+        except Exception as e:
+            logger.error(
+                f"Failed to start comment assist workflow for {github_repo_name}#{pr_number}: {e}",
+                exc_info=True,
+            )
+            return {"status": "error", "reason": f"Failed to start workflow: {str(e)}"}
             
     async def _handle_pull_request_webhook(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """

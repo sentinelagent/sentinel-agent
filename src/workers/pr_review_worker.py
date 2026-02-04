@@ -2,6 +2,7 @@ import asyncio
 from temporalio.worker import Worker
 from src.utils.logging.otel_logger import logger
 from src.workflows.pr_review_workflow import PRReviewWorkflow
+from src.workflows.comment_assist_workflow import PRCommentAssistWorkflow
 from src.activities.pr_review_activities import (
     fetch_pr_context_activity,
     clone_pr_head_activity,
@@ -13,6 +14,13 @@ from src.activities.pr_review_activities import (
     persist_pr_review_metadata_activity,
     anchor_and_publish_activity,
     cleanup_pr_clone_activity,
+)
+from src.activities.comment_assist_activities import (
+    fetch_comment_context_activity,
+    build_focused_seed_set_activity,
+    assemble_comment_context_activity,
+    generate_comment_response_activity,
+    publish_comment_reply_activity,
 )
 from src.core.config import settings
 from src.core.temporal_client import connect_to_temporal_with_retry
@@ -75,7 +83,7 @@ async def main():
     worker = Worker(
         client,
         task_queue="pr-review-pipeline",
-        workflows=[PRReviewWorkflow],
+        workflows=[PRReviewWorkflow, PRCommentAssistWorkflow],
         activities=[
             fetch_pr_context_activity,
             clone_pr_head_activity,
@@ -87,6 +95,11 @@ async def main():
             persist_pr_review_metadata_activity,
             anchor_and_publish_activity,
             cleanup_pr_clone_activity,
+            fetch_comment_context_activity,
+            build_focused_seed_set_activity,
+            assemble_comment_context_activity,
+            generate_comment_response_activity,
+            publish_comment_reply_activity,
         ],
         workflow_runner=SandboxedWorkflowRunner(restrictions=restrictions),
     )

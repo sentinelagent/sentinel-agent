@@ -202,6 +202,28 @@ class ReviewConfidenceException(ReviewValidationException):
 
 
 # ============================================================================
+# COMMENT ASSIST EXCEPTIONS
+# ============================================================================
+
+class CommentAssistException(PRReviewException):
+    """Base exception for comment assist workflow errors."""
+    def __init__(self, message: str):
+        super().__init__(message=message)
+
+
+class CommentNotFoundException(CommentAssistException):
+    """Raised when a GitHub review comment cannot be found."""
+    def __init__(self, comment_id: int):
+        super().__init__(message=f"Comment not found: {comment_id}")
+
+
+class InvalidMentionException(CommentAssistException):
+    """Raised when a @sentinel mention is invalid or empty."""
+    def __init__(self, message: str = "Invalid @sentinel mention"):
+        super().__init__(message=message)
+
+
+# ============================================================================
 # PUBLISHING EXCEPTIONS
 # ============================================================================
 
