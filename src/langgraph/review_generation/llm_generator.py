@@ -109,7 +109,30 @@ class LLMGeneratorNode(BaseReviewGenerationNode):
         
         # Call LLM
         response = await self._call_llm(structured_prompt)
-        
+        response = await self._retry_if_truncated(response, structured_prompt)
+
+        # Log response metadata for debugging truncation issues
+        stop_reason = response.get("stop_reason", "unknown")
+        output_tokens = response.get("usage", {}).get("output_tokens", 0)
+        content_length = len(response.get("content", ""))
+
+        self.logger.info(
+            f"[LLM_RESPONSE] stop_reason={stop_reason}, "
+            f"output_tokens={output_tokens}, content_length={content_length} chars"
+        )
+
+        # Warn if response appears truncated
+        if stop_reason not in ["stop", "STOP", "end_turn", "FinishReason.STOP"]:
+            if self._is_truncated_stop_reason(stop_reason):
+                self.logger.warning(
+                    f"[LLM_TRUNCATED] Response may be incomplete! "
+                    f"stop_reason={stop_reason}, expected one of: stop, STOP, end_turn, FinishReason.STOP"
+                )
+            else:
+                self.logger.warning(
+                    f"[LLM_NONSTOP] LLM returned non-stop finish reason: {stop_reason}"
+                )
+
         # Extract and parse JSON from response
         raw_content = response.get("content", "")
         parsed_json = self._extract_json_from_response(raw_content)
@@ -211,8 +234,9 @@ class LLMGeneratorNode(BaseReviewGenerationNode):
             response = await self.llm_client.generate_completion(
                 prompt=prompt.user_prompt,
                 system_prompt=prompt.system_prompt,
-                max_tokens=prompt.estimated_max_completion_tokens,
+                max_tokens=self._get_max_tokens(prompt),
                 temperature=0.1,  # Low temperature for consistent structured output
+                response_mime_type="application/json",
             )
             return response
             
@@ -238,6 +262,52 @@ class LLMGeneratorNode(BaseReviewGenerationNode):
                 provider=self.llm_client.provider_name if self._llm_client else "unknown",
                 cause=e
             )
+
+    def _get_max_tokens(self, prompt: StructuredPrompt) -> int:
+        """Pick a safe max token budget for completions."""
+        prompt_budget = max(prompt.estimated_max_completion_tokens, 1024)
+        client_budget = getattr(self.llm_client, "max_tokens", prompt_budget)
+        return min(prompt_budget, client_budget)
+
+    def _is_truncated_stop_reason(self, stop_reason: Any) -> bool:
+        """Check for stop reasons that indicate truncation."""
+        normalized = str(stop_reason).lower()
+        return normalized in {
+            "max_tokens",
+            "finishreason.max_tokens",
+            "finish_reason_max_tokens",
+            "stop_reason_max_tokens",
+            "2",
+        }
+
+    async def _retry_if_truncated(
+        self,
+        response: Dict[str, Any],
+        prompt: StructuredPrompt
+    ) -> Dict[str, Any]:
+        """Retry once with a higher token budget if the response was truncated."""
+        stop_reason = response.get("stop_reason", "unknown")
+        if not self._is_truncated_stop_reason(stop_reason):
+            return response
+
+        current_budget = self._get_max_tokens(prompt)
+        client_budget = getattr(self.llm_client, "max_tokens", current_budget)
+        if current_budget >= client_budget:
+            return response
+
+        retry_budget = min(int(current_budget * 1.5), client_budget)
+        self.logger.warning(
+            f"[LLM_TRUNCATED] Retrying with higher max_tokens={retry_budget} "
+            f"(previous={current_budget})."
+        )
+
+        return await self.llm_client.generate_completion(
+            prompt=prompt.user_prompt,
+            system_prompt=prompt.system_prompt,
+            max_tokens=retry_budget,
+            temperature=0.1,
+            response_mime_type="application/json",
+        )
 
     # ========================================================================
     # JSON EXTRACTION
