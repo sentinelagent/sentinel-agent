@@ -1,10 +1,6 @@
 import logging
 import os
 
-from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
-from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-from opentelemetry.sdk._logs._internal.export import BatchLogRecordProcessor
-from opentelemetry.sdk.resources import Resource
 from pythonjsonlogger import jsonlogger
 
 SERVICE_NAME: str = "sentinel-agent"
@@ -34,6 +30,11 @@ def get_logger(name: str) -> logging.Logger:
     # Add OTEL handler
     try:
         if os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", False):
+            from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+            from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+            from opentelemetry.sdk._logs._internal.export import BatchLogRecordProcessor
+            from opentelemetry.sdk.resources import Resource
+
             logger_provider = LoggerProvider(
                 Resource.create(
                     {
