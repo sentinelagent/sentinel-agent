@@ -9,6 +9,7 @@ from .pr_patch import PRFilePatch, PRHunk
 from .seed_set import SeedSetS0, SeedSymbol, SeedFile
 from .context_pack import ContextPack, ContextItem, ContextPackLimits, ContextPackStats
 from .review_output import LLMReviewOutput, Finding
+from .comment_assist import PRCommentAssistRequest, PRCommentAssistResult
 
 __all__ = [
     # Workflow models
@@ -33,4 +34,8 @@ __all__ = [
     # Review output models
     "LLMReviewOutput",
     "Finding",
+
+    # Comment assist models
+    "PRCommentAssistRequest",
+    "PRCommentAssistResult",
 ]

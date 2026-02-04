@@ -210,6 +210,35 @@ class PRReviewLimits(BaseModel):
         }
 
 
+class CommentAssistLimits(BaseModel):
+    """Hard limits for comment assist context assembly."""
+
+    max_context_items: int = Field(
+        default=10,
+        description="Maximum number of context items",
+        ge=3,
+        le=25,
+    )
+    max_total_characters: int = Field(
+        default=20_000,
+        description="Maximum total character count",
+        ge=5_000,
+        le=100_000,
+    )
+    max_lines_per_snippet: int = Field(
+        default=60,
+        description="Maximum lines per code snippet",
+        ge=10,
+        le=200,
+    )
+    max_chars_per_item: int = Field(
+        default=1500,
+        description="Maximum characters per context item",
+        ge=200,
+        le=5000,
+    )
+
+
 class PRReviewTimeouts(BaseModel):
     """Timeout configuration for different pipeline stages."""
 
@@ -678,6 +707,10 @@ class PRReviewSettings(BaseSettings):
     limits: PRReviewLimits = Field(
         default_factory=PRReviewLimits,
         description="Hard limits for processing"
+    )
+    comment_assist_limits: CommentAssistLimits = Field(
+        default_factory=CommentAssistLimits,
+        description="Hard limits for comment assist context assembly"
     )
     timeouts: PRReviewTimeouts = Field(
         default_factory=PRReviewTimeouts,
