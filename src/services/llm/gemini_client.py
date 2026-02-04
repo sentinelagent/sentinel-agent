@@ -15,7 +15,7 @@ class GeminiClient(BaseLLMClient):
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-3-flash-preview",  # Use gemini-3-flash-preview for v1beta compatibility
+        model: str = "gemini-2.0-flash",  # Use stable model - preview models have strict limits
         max_tokens: int = 8000,
         temperature: float = 0.0,
         timeout: int = 60
@@ -59,10 +59,18 @@ class GeminiClient(BaseLLMClient):
                 full_prompt = f"{system_prompt}\n\n{prompt}"
             
             # Override generation config if provided
-            generation_config = GenerationConfig(
-                max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
-                temperature=kwargs.get("temperature", self.temperature),
-            )
+            requested_max_tokens = kwargs.get("max_tokens", self.max_tokens)
+            logger.info(f"[GEMINI_DEBUG] Requesting max_output_tokens={requested_max_tokens}, temperature={kwargs.get('temperature', self.temperature)}")
+
+            generation_kwargs: Dict[str, Any] = {
+                "max_output_tokens": requested_max_tokens,
+                "temperature": kwargs.get("temperature", self.temperature),
+            }
+            response_mime_type = kwargs.get("response_mime_type")
+            if response_mime_type:
+                generation_kwargs["response_mime_type"] = response_mime_type
+
+            generation_config = GenerationConfig(**generation_kwargs)
             
             # Generate response (synchronous call)
             response = self.client.generate_content(
@@ -79,8 +87,21 @@ class GeminiClient(BaseLLMClient):
             stop_reason = "stop"
             if response.candidates and len(response.candidates) > 0:
                 finish_reason = response.candidates[0].finish_reason
-                if finish_reason:
-                    stop_reason = str(finish_reason).lower()
+                if finish_reason is not None:
+                    if isinstance(finish_reason, int):
+                        finish_reason_map = {
+                            0: "unspecified",
+                            1: "stop",
+                            2: "max_tokens",
+                            3: "safety",
+                            4: "recitation",
+                            5: "other",
+                        }
+                        stop_reason = finish_reason_map.get(finish_reason, str(finish_reason))
+                    elif hasattr(finish_reason, "name"):
+                        stop_reason = finish_reason.name.lower()
+                    else:
+                        stop_reason = str(finish_reason).lower()
             
             return {
                 "content": response.text,
