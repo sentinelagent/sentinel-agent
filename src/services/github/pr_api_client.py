@@ -352,7 +352,7 @@ class PRApiClient:
         Returns:
             Created reply comment object
         """
-        endpoint = f"/repos/{repo_name}/pulls/comments/{comment_id}/replies"
+        endpoint = f"/repos/{repo_name}/pulls/{pr_number}/comments/{comment_id}/replies"
         payload = {"body": body}
 
         try:
